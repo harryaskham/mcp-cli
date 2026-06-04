@@ -1014,6 +1014,95 @@ mod tests {
         assert_eq!(responses[2]["result"]["isError"], false);
     }
 
+    #[test]
+    fn stdio_server_answers_ping_with_empty_result() {
+        let server = McpServer::new(
+            StdioServerConfig {
+                server_name: "sample-mcp".to_string(),
+                server_version: "0.0.1".to_string(),
+            },
+            build_math_router(),
+        );
+
+        let input = frame_request(&json!({
+            "jsonrpc": "2.0",
+            "id": 42,
+            "method": "ping",
+            "params": {}
+        }));
+
+        let mut output = Vec::new();
+        server
+            .serve_transport(&(), std::io::Cursor::new(input), &mut output)
+            .expect("stdio server should handle a ping request");
+
+        let responses = parse_framed_responses(&output);
+        assert_eq!(responses.len(), 1);
+        assert_eq!(responses[0]["jsonrpc"], "2.0");
+        assert_eq!(responses[0]["id"], 42);
+        assert_eq!(responses[0]["result"], json!({}));
+    }
+
+    #[test]
+    fn stdio_server_does_not_respond_to_initialized_notification() {
+        let server = McpServer::new(
+            StdioServerConfig {
+                server_name: "sample-mcp".to_string(),
+                server_version: "0.0.1".to_string(),
+            },
+            build_math_router(),
+        );
+
+        let input = frame_request(&json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+        }));
+
+        let mut output = Vec::new();
+        server
+            .serve_transport(&(), std::io::Cursor::new(input), &mut output)
+            .expect("stdio server should accept the initialized notification");
+
+        assert!(
+            output.is_empty(),
+            "initialized notification must not produce a response"
+        );
+    }
+
+    #[test]
+    fn stdio_server_reports_unknown_method_as_method_not_found() {
+        let server = McpServer::new(
+            StdioServerConfig {
+                server_name: "sample-mcp".to_string(),
+                server_version: "0.0.1".to_string(),
+            },
+            build_math_router(),
+        );
+
+        let input = frame_request(&json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "does/not/exist",
+            "params": {}
+        }));
+
+        let mut output = Vec::new();
+        server
+            .serve_transport(&(), std::io::Cursor::new(input), &mut output)
+            .expect("stdio server should handle an unknown method");
+
+        let responses = parse_framed_responses(&output);
+        assert_eq!(responses.len(), 1);
+        assert_eq!(responses[0]["id"], 7);
+        assert_eq!(responses[0]["error"]["code"], -32601);
+        assert!(
+            responses[0]["error"]["message"]
+                .as_str()
+                .expect("error message should be a string")
+                .contains("does/not/exist")
+        );
+    }
+
     fn frame_request(value: &Value) -> Vec<u8> {
         let body = serde_json::to_vec(value).expect("request should serialize");
         let mut message = format!("Content-Length: {}\r\n\r\n", body.len()).into_bytes();
