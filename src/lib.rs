@@ -675,8 +675,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        EnvelopeMeta, ErrorCategory, JSON_SCHEMA_VERSION, JsonEnvelope, JsonError, McpServer,
-        StdioServerConfig, StructuredError, ToolRouter, write_json_result_ref,
+        EnvelopeMeta, ErrorCategory, JSON_SCHEMA_VERSION, JsonEnvelope, JsonError, McpCliError,
+        McpServer, StdioServerConfig, StructuredError, ToolRouter, read_protocol_message,
+        write_json_result, write_json_result_ref,
     };
     use clap::{Args, Parser, Subcommand};
     use schemars::JsonSchema;
@@ -1101,6 +1102,84 @@ mod tests {
                 .expect("error message should be a string")
                 .contains("does/not/exist")
         );
+    }
+
+    #[test]
+    fn read_protocol_message_errors_on_missing_content_length() {
+        let mut input = std::io::Cursor::new(b"X-Other: 1\r\n\r\n".to_vec());
+
+        let error = read_protocol_message(&mut input)
+            .expect_err("missing Content-Length should be a protocol error");
+
+        match error {
+            McpCliError::Protocol(message) => assert!(message.contains("Content-Length")),
+            other => panic!("expected protocol error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_protocol_message_errors_on_invalid_content_length() {
+        let mut input = std::io::Cursor::new(b"Content-Length: not-a-number\r\n\r\n".to_vec());
+
+        let error = read_protocol_message(&mut input)
+            .expect_err("non-numeric Content-Length should be a protocol error");
+
+        match error {
+            McpCliError::Protocol(message) => assert!(message.contains("Content-Length")),
+            other => panic!("expected protocol error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_protocol_message_errors_on_eof_mid_headers() {
+        let mut input = std::io::Cursor::new(b"Content-Length: 12\r\n".to_vec());
+
+        let error = read_protocol_message(&mut input)
+            .expect_err("EOF before the header terminator should be a protocol error");
+
+        match error {
+            McpCliError::Protocol(message) => assert!(message.contains("EOF")),
+            other => panic!("expected protocol error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_protocol_message_returns_none_on_clean_eof() {
+        let mut input = std::io::Cursor::new(Vec::new());
+
+        let message = read_protocol_message(&mut input).expect("clean EOF should not be an error");
+
+        assert!(message.is_none());
+    }
+
+    #[test]
+    fn write_json_result_emits_success_envelope_with_trailing_newline() {
+        let mut output = Vec::new();
+        let result: Result<Value, SampleError> = Ok(json!({ "sum": 12 }));
+
+        write_json_result(&mut output, result).expect("json result should serialize");
+
+        let rendered = String::from_utf8(output).expect("json output should be utf-8");
+        assert!(rendered.ends_with('\n'), "output should end with a newline");
+        let value: Value =
+            serde_json::from_str(rendered.trim()).expect("output should be valid json");
+        assert_eq!(value["status"], "success");
+        assert_eq!(value["data"]["sum"], 12);
+    }
+
+    #[test]
+    fn write_json_result_emits_error_envelope_for_structured_error() {
+        let mut output = Vec::new();
+        let result: Result<Value, SampleError> = Err(SampleError::validation("bad input"));
+
+        write_json_result(&mut output, result).expect("json error result should serialize");
+
+        let rendered = String::from_utf8(output).expect("json output should be utf-8");
+        let value: Value =
+            serde_json::from_str(rendered.trim()).expect("output should be valid json");
+        assert_eq!(value["status"], "error");
+        assert_eq!(value["error"]["category"], "validation");
+        assert_eq!(value["error"]["message"], "bad input");
     }
 
     fn frame_request(value: &Value) -> Vec<u8> {
