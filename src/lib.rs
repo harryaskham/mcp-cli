@@ -1239,6 +1239,70 @@ mod tests {
         }
     }
 
+    #[test]
+    fn stdio_server_surfaces_tool_call_errors_as_is_error() {
+        let server = McpServer::new(
+            StdioServerConfig {
+                server_name: "sample-mcp".to_string(),
+                server_version: "0.0.1".to_string(),
+            },
+            build_math_router(),
+        );
+
+        let input = [
+            frame_request(&json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "does_not_exist",
+                    "arguments": {}
+                }
+            })),
+            frame_request(&json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "math_add",
+                    "arguments": { "lhs": 3 }
+                }
+            })),
+        ]
+        .concat();
+
+        let mut output = Vec::new();
+        server
+            .serve_transport(&(), std::io::Cursor::new(input), &mut output)
+            .expect("stdio server should handle failing tool calls");
+
+        let responses = parse_framed_responses(&output);
+        assert_eq!(responses.len(), 2);
+
+        // Unknown tool name surfaces as a structured error, not a transport failure.
+        assert_eq!(responses[0]["result"]["isError"], true);
+        assert_eq!(
+            responses[0]["result"]["structuredContent"]["status"],
+            "error"
+        );
+        assert_eq!(
+            responses[0]["result"]["structuredContent"]["error"]["code"],
+            "unknown_tool"
+        );
+
+        // Arguments that fail typed validation also surface as isError with a
+        // validation error envelope embedded in structuredContent.
+        assert_eq!(responses[1]["result"]["isError"], true);
+        assert_eq!(
+            responses[1]["result"]["structuredContent"]["error"]["code"],
+            "invalid_tool_arguments"
+        );
+        assert_eq!(
+            responses[1]["result"]["structuredContent"]["error"]["category"],
+            "validation"
+        );
+    }
+
     fn frame_request(value: &Value) -> Vec<u8> {
         let body = serde_json::to_vec(value).expect("request should serialize");
         let mut message = format!("Content-Length: {}\r\n\r\n", body.len()).into_bytes();
