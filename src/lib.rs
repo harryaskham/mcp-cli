@@ -1001,6 +1001,12 @@ mod tests {
         let responses = parse_framed_responses(&output);
         assert_eq!(responses.len(), 3);
         assert_eq!(responses[0]["result"]["serverInfo"]["name"], "sample-mcp");
+        assert_eq!(responses[0]["result"]["serverInfo"]["version"], "0.0.1");
+        assert_eq!(responses[0]["result"]["protocolVersion"], "2024-11-05");
+        assert_eq!(
+            responses[0]["result"]["capabilities"]["tools"]["listChanged"],
+            false
+        );
         assert!(
             responses[1]["result"]["tools"]
                 .as_array()
@@ -1180,6 +1186,57 @@ mod tests {
         assert_eq!(value["status"], "error");
         assert_eq!(value["error"]["category"], "validation");
         assert_eq!(value["error"]["message"], "bad input");
+    }
+
+    #[test]
+    fn success_envelope_round_trips_through_serde() {
+        let original = JsonEnvelope::success_for("list", json!({ "crate": "mcp-cli" }));
+
+        let encoded = serde_json::to_string(&original).expect("success envelope serializes");
+        let decoded: JsonEnvelope<Value> =
+            serde_json::from_str(&encoded).expect("success envelope deserializes");
+
+        assert_eq!(decoded, original);
+        match decoded {
+            JsonEnvelope::Success { meta, data } => {
+                assert_eq!(meta.command.as_deref(), Some("list"));
+                assert_eq!(meta.schema_version, JSON_SCHEMA_VERSION);
+                assert_eq!(data["crate"], "mcp-cli");
+            }
+            JsonEnvelope::Error { .. } => panic!("expected success variant after round-trip"),
+        }
+    }
+
+    #[test]
+    fn error_envelope_round_trips_through_serde() {
+        let original: JsonEnvelope<Value> = JsonEnvelope::error_for(
+            "capture",
+            JsonError::new(
+                ErrorCategory::Validation,
+                "invalid_target",
+                "placeholder validation failure",
+            )
+            .with_details(json!({ "field": "window" })),
+        );
+
+        let encoded = serde_json::to_string(&original).expect("error envelope serializes");
+        let decoded: JsonEnvelope<Value> =
+            serde_json::from_str(&encoded).expect("error envelope deserializes");
+
+        assert_eq!(decoded, original);
+        match decoded {
+            JsonEnvelope::Error { meta, error } => {
+                assert_eq!(meta.command.as_deref(), Some("capture"));
+                assert_eq!(error.category, ErrorCategory::Validation);
+                assert_eq!(error.code, "invalid_target");
+                assert_eq!(error.message, "placeholder validation failure");
+                assert_eq!(
+                    error.details.expect("details should survive round-trip")["field"],
+                    "window"
+                );
+            }
+            JsonEnvelope::Success { .. } => panic!("expected error variant after round-trip"),
+        }
     }
 
     fn frame_request(value: &Value) -> Vec<u8> {
