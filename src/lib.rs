@@ -618,56 +618,46 @@ impl McpCliError {
     }
 }
 
+/// Read one newline-delimited JSON message from an MCP stdio transport.
+///
+/// The MCP stdio transport frames each JSON-RPC message as a single line of
+/// UTF-8 JSON terminated by `\n` (no `Content-Length` headers, no embedded
+/// newlines). Blank lines between messages are skipped. Returns `Ok(None)` on a
+/// clean end of stream.
 fn read_protocol_message<R>(reader: &mut R) -> Result<Option<Vec<u8>>, McpCliError>
 where
     R: BufRead,
 {
-    let mut content_length = None;
     let mut line = String::new();
 
     loop {
         line.clear();
         let bytes_read = reader.read_line(&mut line)?;
         if bytes_read == 0 {
-            return if content_length.is_none() {
-                Ok(None)
-            } else {
-                Err(McpCliError::Protocol(
-                    "unexpected EOF while reading MCP headers".to_string(),
-                ))
-            };
-        }
-
-        if line == "\r\n" || line == "\n" {
-            break;
+            return Ok(None);
         }
 
         let trimmed = line.trim_end_matches(['\r', '\n']);
-        if let Some((name, value)) = trimmed.split_once(':')
-            && name.eq_ignore_ascii_case("content-length")
-        {
-            let parsed_length = value.trim().parse::<usize>().map_err(|error| {
-                McpCliError::Protocol(format!("invalid Content-Length header: {error}"))
-            })?;
-            content_length = Some(parsed_length);
+        if trimmed.is_empty() {
+            // Tolerate blank separator lines between messages.
+            continue;
         }
-    }
 
-    let length = content_length.ok_or_else(|| {
-        McpCliError::Protocol("missing Content-Length header in MCP message".to_string())
-    })?;
-    let mut body = vec![0; length];
-    std::io::Read::read_exact(reader, &mut body)?;
-    Ok(Some(body))
+        return Ok(Some(trimmed.as_bytes().to_vec()));
+    }
 }
 
+/// Write one newline-delimited JSON message to an MCP stdio transport.
+///
+/// Emits compact JSON (no embedded newlines) followed by a single `\n`, then
+/// flushes so the peer sees the complete message immediately.
 fn write_protocol_message<W>(writer: &mut W, value: &Value) -> Result<(), McpCliError>
 where
     W: Write,
 {
     let body = serde_json::to_vec(value)?;
-    write!(writer, "Content-Length: {}\r\n\r\n", body.len())?;
     writer.write_all(&body)?;
+    writer.write_all(b"\n")?;
     writer.flush()?;
     Ok(())
 }
@@ -1111,42 +1101,38 @@ mod tests {
     }
 
     #[test]
-    fn read_protocol_message_errors_on_missing_content_length() {
-        let mut input = std::io::Cursor::new(b"X-Other: 1\r\n\r\n".to_vec());
+    fn read_protocol_message_reads_one_newline_delimited_line() {
+        let mut input = std::io::Cursor::new(b"{\"jsonrpc\":\"2.0\"}\n".to_vec());
 
-        let error = read_protocol_message(&mut input)
-            .expect_err("missing Content-Length should be a protocol error");
+        let message = read_protocol_message(&mut input)
+            .expect("a newline-delimited line should read cleanly")
+            .expect("a message should be present");
 
-        match error {
-            McpCliError::Protocol(message) => assert!(message.contains("Content-Length")),
-            other => panic!("expected protocol error, got {other:?}"),
-        }
+        assert_eq!(message, b"{\"jsonrpc\":\"2.0\"}");
     }
 
     #[test]
-    fn read_protocol_message_errors_on_invalid_content_length() {
-        let mut input = std::io::Cursor::new(b"Content-Length: not-a-number\r\n\r\n".to_vec());
+    fn read_protocol_message_skips_blank_separator_lines() {
+        let mut input = std::io::Cursor::new(b"\n\r\n{\"id\":1}\n".to_vec());
 
-        let error = read_protocol_message(&mut input)
-            .expect_err("non-numeric Content-Length should be a protocol error");
+        let message = read_protocol_message(&mut input)
+            .expect("blank lines should be skipped")
+            .expect("a message should follow the blank lines");
 
-        match error {
-            McpCliError::Protocol(message) => assert!(message.contains("Content-Length")),
-            other => panic!("expected protocol error, got {other:?}"),
-        }
+        assert_eq!(message, b"{\"id\":1}");
     }
 
     #[test]
-    fn read_protocol_message_errors_on_eof_mid_headers() {
-        let mut input = std::io::Cursor::new(b"Content-Length: 12\r\n".to_vec());
+    fn read_protocol_message_returns_raw_line_for_non_json_text() {
+        // The reader is framing-only: it returns the raw line and lets the serve
+        // layer reject non-JSON, matching the MCP stdio NDJSON transport.
+        let mut input = std::io::Cursor::new(b"this is not json\n".to_vec());
 
-        let error = read_protocol_message(&mut input)
-            .expect_err("EOF before the header terminator should be a protocol error");
+        let message = read_protocol_message(&mut input)
+            .expect("reading a line should not itself fail")
+            .expect("the raw line should be returned");
 
-        match error {
-            McpCliError::Protocol(message) => assert!(message.contains("EOF")),
-            other => panic!("expected protocol error, got {other:?}"),
-        }
+        assert_eq!(message, b"this is not json");
     }
 
     #[test]
@@ -1240,6 +1226,31 @@ mod tests {
     }
 
     #[test]
+    fn stdio_server_rejects_non_json_input_instead_of_hanging() {
+        // Regression: typing arbitrary text into the stdio transport must surface
+        // a JSON error rather than silently consuming it (which previously hung).
+        let server = McpServer::new(
+            StdioServerConfig {
+                server_name: "sample-mcp".to_string(),
+                server_version: "0.0.1".to_string(),
+            },
+            build_math_router(),
+        );
+
+        let mut output = Vec::new();
+        let result = server.serve_transport(
+            &(),
+            std::io::Cursor::new(b"hello there\n".to_vec()),
+            &mut output,
+        );
+
+        match result {
+            Err(McpCliError::Json(_)) => {}
+            other => panic!("expected a JSON parse error on garbage input, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn stdio_server_surfaces_tool_call_errors_as_is_error() {
         let server = McpServer::new(
             StdioServerConfig {
@@ -1304,34 +1315,16 @@ mod tests {
     }
 
     fn frame_request(value: &Value) -> Vec<u8> {
-        let body = serde_json::to_vec(value).expect("request should serialize");
-        let mut message = format!("Content-Length: {}\r\n\r\n", body.len()).into_bytes();
-        message.extend(body);
+        let mut message = serde_json::to_vec(value).expect("request should serialize");
+        message.push(b'\n');
         message
     }
 
-    fn parse_framed_responses(mut bytes: &[u8]) -> Vec<Value> {
-        let mut responses = Vec::new();
-
-        while !bytes.is_empty() {
-            let header_end = bytes
-                .windows(4)
-                .position(|window| window == b"\r\n\r\n")
-                .expect("framed response should contain a header terminator");
-            let (header, remainder) = bytes.split_at(header_end + 4);
-            let header_str = std::str::from_utf8(header).expect("header should be valid utf-8");
-            let length = header_str
-                .lines()
-                .find_map(|line| line.strip_prefix("Content-Length: "))
-                .expect("response should include Content-Length")
-                .trim()
-                .parse::<usize>()
-                .expect("content length should parse");
-            let (body, rest) = remainder.split_at(length);
-            responses.push(serde_json::from_slice(body).expect("response body should be json"));
-            bytes = rest;
-        }
-
-        responses
+    fn parse_framed_responses(bytes: &[u8]) -> Vec<Value> {
+        let text = std::str::from_utf8(bytes).expect("responses should be valid utf-8");
+        text.lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str(line).expect("response line should be json"))
+            .collect()
     }
 }
