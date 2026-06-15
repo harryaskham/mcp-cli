@@ -467,8 +467,18 @@ impl<Ctx> McpServer<Ctx> {
         ctx: &Ctx,
         request: Value,
     ) -> Result<Option<Value>, McpCliError> {
-        let request: JsonRpcRequest = serde_json::from_value(request)?;
-        self.handle_request(ctx, request)
+        // Recover any `id` before the value is consumed by typed parsing so an
+        // Invalid Request response can still reference it (null when absent).
+        let recovered_id = request.get("id").cloned().unwrap_or(Value::Null);
+        match serde_json::from_value::<JsonRpcRequest>(request) {
+            Ok(request) => self.handle_request(ctx, request),
+            // A value that parses as JSON but is not a valid JSON-RPC request
+            // (e.g. missing `method`) is an Invalid Request. Respond with the
+            // JSON-RPC `-32600` error and keep serving rather than tearing the
+            // session down. The id is recovered from the raw value when present
+            // (null otherwise), as required by JSON-RPC 2.0.
+            Err(error) => Ok(Some(invalid_request_response(&recovered_id, &error))),
+        }
     }
 
     pub fn serve_stdio(&self, ctx: &Ctx) -> Result<(), McpCliError> {
@@ -541,32 +551,50 @@ impl<Ctx> McpServer<Ctx> {
                 })
             }),
             "tools/call" => {
-                let params: ToolCallParams =
-                    serde_json::from_value(request.params.unwrap_or_else(|| json!({})))?;
-                let envelope = self.router.call_tool(
-                    ctx,
-                    &params.name,
-                    params.arguments.unwrap_or_else(|| json!({})),
-                );
-                let structured_content = serde_json::to_value(&envelope)?;
-                let text_content = serde_json::to_string(&envelope)?;
+                match serde_json::from_value::<ToolCallParams>(
+                    request.params.unwrap_or_else(|| json!({})),
+                ) {
+                    Ok(params) => {
+                        let envelope = self.router.call_tool(
+                            ctx,
+                            &params.name,
+                            params.arguments.unwrap_or_else(|| json!({})),
+                        );
+                        let structured_content = serde_json::to_value(&envelope)?;
+                        let text_content = serde_json::to_string(&envelope)?;
 
-                request.id.map(|id| {
-                    json!({
-                        "jsonrpc": "2.0",
-                        "id": id,
-                        "result": {
-                            "content": [
-                                {
-                                    "type": "text",
-                                    "text": text_content
+                        request.id.map(|id| {
+                            json!({
+                                "jsonrpc": "2.0",
+                                "id": id,
+                                "result": {
+                                    "content": [
+                                        {
+                                            "type": "text",
+                                            "text": text_content
+                                        }
+                                    ],
+                                    "structuredContent": structured_content,
+                                    "isError": envelope.is_error()
                                 }
-                            ],
-                            "structuredContent": structured_content,
-                            "isError": envelope.is_error()
-                        }
-                    })
-                })
+                            })
+                        })
+                    }
+                    // A `tools/call` whose params do not match the expected shape
+                    // (e.g. missing `name`) is Invalid params. Respond with the
+                    // JSON-RPC `-32602` error and keep serving instead of
+                    // propagating a transport error that drops the session.
+                    Err(error) => request.id.map(|id| {
+                        json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "error": {
+                                "code": -32602,
+                                "message": format!("invalid params: {error}")
+                            }
+                        })
+                    }),
+                }
             }
             method => request.id.map(|id| {
                 json!({
@@ -616,6 +644,22 @@ impl McpCliError {
     pub const fn category(&self) -> ErrorCategory {
         ErrorCategory::SerializationError
     }
+}
+
+/// Build a JSON-RPC `-32600 Invalid Request` response for a value that parsed
+/// as JSON but is not a valid JSON-RPC request object.
+///
+/// The `id` should be recovered from the raw request value when present and is
+/// `null` otherwise, as required by JSON-RPC 2.0 for Invalid Request errors.
+fn invalid_request_response(id: &Value, error: &serde_json::Error) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": {
+            "code": -32600,
+            "message": format!("invalid JSON-RPC request: {error}")
+        }
+    })
 }
 
 /// Read one newline-delimited JSON message from an MCP stdio transport.
@@ -1312,6 +1356,113 @@ mod tests {
             responses[1]["result"]["structuredContent"]["error"]["category"],
             "validation"
         );
+    }
+
+    #[test]
+    fn stdio_server_invalid_request_object_returns_invalid_request_and_keeps_serving() {
+        // A value that parses as JSON but is not a valid JSON-RPC request (no
+        // `method`) must produce a `-32600` error and the session must keep
+        // serving subsequent valid requests rather than tearing down.
+        let server = McpServer::new(
+            StdioServerConfig {
+                server_name: "sample-mcp".to_string(),
+                server_version: "0.0.1".to_string(),
+            },
+            build_math_router(),
+        );
+
+        let input = [
+            // Invalid request with a recoverable id.
+            frame_request(&json!({
+                "jsonrpc": "2.0",
+                "id": 9,
+                "foo": "bar"
+            })),
+            // Invalid request with no id at all: response id must be null.
+            frame_request(&json!({
+                "jsonrpc": "2.0",
+                "foo": "bar"
+            })),
+            // A normal request that must still be answered after the bad ones.
+            frame_request(&json!({
+                "jsonrpc": "2.0",
+                "id": 5,
+                "method": "ping",
+                "params": {}
+            })),
+        ]
+        .concat();
+
+        let mut output = Vec::new();
+        server
+            .serve_transport(&(), std::io::Cursor::new(input), &mut output)
+            .expect("invalid request objects must not tear down the session");
+
+        let responses = parse_framed_responses(&output);
+        assert_eq!(responses.len(), 3);
+
+        assert_eq!(responses[0]["id"], 9);
+        assert_eq!(responses[0]["error"]["code"], -32600);
+
+        assert_eq!(responses[1]["id"], Value::Null);
+        assert_eq!(responses[1]["error"]["code"], -32600);
+
+        // The session survived and answered the following valid request.
+        assert_eq!(responses[2]["id"], 5);
+        assert_eq!(responses[2]["result"], json!({}));
+    }
+
+    #[test]
+    fn stdio_server_invalid_tool_call_params_returns_invalid_params_and_keeps_serving() {
+        // A `tools/call` whose params do not match the expected shape (missing
+        // `name`) must produce a `-32602` error and the session must keep
+        // serving rather than propagating a transport error.
+        let server = McpServer::new(
+            StdioServerConfig {
+                server_name: "sample-mcp".to_string(),
+                server_version: "0.0.1".to_string(),
+            },
+            build_math_router(),
+        );
+
+        let input = [
+            frame_request(&json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "arguments": { "lhs": 1, "rhs": 2 }
+                }
+            })),
+            frame_request(&json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "ping",
+                "params": {}
+            })),
+        ]
+        .concat();
+
+        let mut output = Vec::new();
+        server
+            .serve_transport(&(), std::io::Cursor::new(input), &mut output)
+            .expect("invalid tool-call params must not tear down the session");
+
+        let responses = parse_framed_responses(&output);
+        assert_eq!(responses.len(), 2);
+
+        assert_eq!(responses[0]["id"], 1);
+        assert_eq!(responses[0]["error"]["code"], -32602);
+        assert!(
+            responses[0]["error"]["message"]
+                .as_str()
+                .expect("error message should be a string")
+                .contains("invalid params")
+        );
+
+        // The session survived and answered the following valid request.
+        assert_eq!(responses[1]["id"], 2);
+        assert_eq!(responses[1]["result"], json!({}));
     }
 
     fn frame_request(value: &Value) -> Vec<u8> {
