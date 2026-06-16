@@ -660,7 +660,11 @@ pub enum McpCliError {
 impl McpCliError {
     #[must_use]
     pub const fn category(&self) -> ErrorCategory {
-        ErrorCategory::SerializationError
+        match self {
+            Self::Io(_) => ErrorCategory::ExecutionFailure,
+            Self::Json(_) => ErrorCategory::SerializationError,
+            Self::Protocol(_) => ErrorCategory::Validation,
+        }
     }
 }
 
@@ -1552,6 +1556,20 @@ mod tests {
         assert_eq!(responses[0]["result"]["protocolVersion"], supported);
         assert_eq!(responses[1]["result"]["protocolVersion"], latest);
         assert_eq!(responses[2]["result"]["protocolVersion"], latest);
+    }
+
+    #[test]
+    fn mcp_cli_error_category_reflects_each_variant() {
+        let io_error = McpCliError::Io(std::io::Error::other("boom"));
+        assert_eq!(io_error.category(), ErrorCategory::ExecutionFailure);
+
+        let json_error = McpCliError::Json(
+            serde_json::from_str::<Value>("{").expect_err("malformed json should fail to parse"),
+        );
+        assert_eq!(json_error.category(), ErrorCategory::SerializationError);
+
+        let protocol_error = McpCliError::Protocol("bad frame".to_string());
+        assert_eq!(protocol_error.category(), ErrorCategory::Validation);
     }
 
     fn frame_request(value: &Value) -> Vec<u8> {
