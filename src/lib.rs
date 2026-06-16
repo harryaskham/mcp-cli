@@ -65,6 +65,11 @@ use thiserror::Error;
 /// Stable schema version for JSON envelopes shared by CLI and MCP surfaces.
 pub const JSON_SCHEMA_VERSION: u32 = 1;
 
+/// MCP protocol versions this server understands, oldest first. The last entry
+/// is the server's preferred (latest) version, advertised when the client's
+/// requested version is unsupported or omitted.
+pub const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2024-11-05", "2025-03-26", "2025-06-18"];
+
 /// Stable categories for structured JSON and MCP errors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -515,24 +520,37 @@ impl<Ctx> McpServer<Ctx> {
         request: JsonRpcRequest,
     ) -> Result<Option<Value>, McpCliError> {
         let response = match request.method.as_str() {
-            "initialize" => request.id.map(|id| {
-                json!({
-                    "jsonrpc": "2.0",
-                    "id": id,
-                    "result": {
-                        "protocolVersion": "2024-11-05",
-                        "capabilities": {
-                            "tools": {
-                                "listChanged": false
+            "initialize" => {
+                // Negotiate the protocol version: echo the client's requested
+                // version when supported, otherwise advertise our latest. The
+                // borrow of `request.params` is released before `request.id` is
+                // moved into the response below.
+                let protocol_version = negotiate_protocol_version(
+                    request
+                        .params
+                        .as_ref()
+                        .and_then(|params| params.get("protocolVersion"))
+                        .and_then(Value::as_str),
+                );
+                request.id.map(|id| {
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": {
+                            "protocolVersion": protocol_version,
+                            "capabilities": {
+                                "tools": {
+                                    "listChanged": false
+                                }
+                            },
+                            "serverInfo": {
+                                "name": self.config.server_name,
+                                "version": self.config.server_version
                             }
-                        },
-                        "serverInfo": {
-                            "name": self.config.server_name,
-                            "version": self.config.server_version
                         }
-                    }
+                    })
                 })
-            }),
+            }
             "notifications/initialized" => None,
             "ping" => request.id.map(|id| {
                 json!({
@@ -646,6 +664,24 @@ impl McpCliError {
     }
 }
 
+/// Negotiate the MCP protocol version to advertise in the `initialize` result.
+///
+/// Per the MCP spec the server echoes the client's requested version when it
+/// supports it, and otherwise responds with its own latest supported version
+/// (also used when the client omits `protocolVersion`), letting the client
+/// decide whether to proceed or disconnect.
+fn negotiate_protocol_version(requested: Option<&str>) -> &'static str {
+    let latest = SUPPORTED_PROTOCOL_VERSIONS[SUPPORTED_PROTOCOL_VERSIONS.len() - 1];
+    match requested {
+        Some(requested) => SUPPORTED_PROTOCOL_VERSIONS
+            .iter()
+            .copied()
+            .find(|version| *version == requested)
+            .unwrap_or(latest),
+        None => latest,
+    }
+}
+
 /// Build a JSON-RPC `-32600 Invalid Request` response for a value that parsed
 /// as JSON but is not a valid JSON-RPC request object.
 ///
@@ -710,8 +746,8 @@ where
 mod tests {
     use super::{
         EnvelopeMeta, ErrorCategory, JSON_SCHEMA_VERSION, JsonEnvelope, JsonError, McpCliError,
-        McpServer, StdioServerConfig, StructuredError, ToolRouter, read_protocol_message,
-        write_json_result, write_json_result_ref,
+        McpServer, SUPPORTED_PROTOCOL_VERSIONS, StdioServerConfig, StructuredError, ToolRouter,
+        read_protocol_message, write_json_result, write_json_result_ref,
     };
     use clap::{Args, Parser, Subcommand};
     use schemars::JsonSchema;
@@ -1004,7 +1040,7 @@ mod tests {
                 "jsonrpc": "2.0",
                 "id": 1,
                 "method": "initialize",
-                "params": {}
+                "params": { "protocolVersion": "2024-11-05" }
             })),
             frame_request(&json!({
                 "jsonrpc": "2.0",
@@ -1463,6 +1499,59 @@ mod tests {
         // The session survived and answered the following valid request.
         assert_eq!(responses[1]["id"], 2);
         assert_eq!(responses[1]["result"], json!({}));
+    }
+
+    #[test]
+    fn stdio_server_initialize_negotiates_protocol_version() {
+        // The server should echo a supported requested version, fall back to its
+        // latest supported version for an unsupported request, and use the
+        // latest when the client omits `protocolVersion`.
+        let server = McpServer::new(
+            StdioServerConfig {
+                server_name: "sample-mcp".to_string(),
+                server_version: "0.0.1".to_string(),
+            },
+            build_math_router(),
+        );
+
+        let latest = SUPPORTED_PROTOCOL_VERSIONS[SUPPORTED_PROTOCOL_VERSIONS.len() - 1];
+        let supported = SUPPORTED_PROTOCOL_VERSIONS[0];
+
+        let input = [
+            // Supported requested version is echoed back verbatim.
+            frame_request(&json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": { "protocolVersion": supported }
+            })),
+            // Unsupported requested version falls back to the latest supported.
+            frame_request(&json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "initialize",
+                "params": { "protocolVersion": "1999-01-01" }
+            })),
+            // Omitted version defaults to the latest supported.
+            frame_request(&json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "initialize",
+                "params": {}
+            })),
+        ]
+        .concat();
+
+        let mut output = Vec::new();
+        server
+            .serve_transport(&(), std::io::Cursor::new(input), &mut output)
+            .expect("stdio server should handle initialize negotiation");
+
+        let responses = parse_framed_responses(&output);
+        assert_eq!(responses.len(), 3);
+        assert_eq!(responses[0]["result"]["protocolVersion"], supported);
+        assert_eq!(responses[1]["result"]["protocolVersion"], latest);
+        assert_eq!(responses[2]["result"]["protocolVersion"], latest);
     }
 
     fn frame_request(value: &Value) -> Vec<u8> {
