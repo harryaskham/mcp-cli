@@ -311,6 +311,11 @@ pub struct ToolMetadata {
     pub name: String,
     pub description: String,
     pub input_schema: Value,
+    /// Optional JSON Schema for the tool's structured output (`structuredContent`),
+    /// advertised to MCP clients per the 2025-06-18 revision. `None` when the tool
+    /// was registered without an output schema.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<Value>,
 }
 
 type ToolHandler<Ctx> = dyn Fn(&Ctx, Value) -> JsonEnvelope<Value> + Send + Sync;
@@ -340,6 +345,7 @@ impl<Ctx> Tool<Ctx> {
             description: description.into(),
             input_schema: serde_json::to_value(schemars::schema_for!(Input))
                 .expect("tool schema should serialize"),
+            output_schema: None,
         };
 
         let erased_handler =
@@ -374,6 +380,30 @@ impl<Ctx> Tool<Ctx> {
             metadata,
             handler: Arc::new(erased_handler),
         }
+    }
+
+    /// Like [`Tool::new_typed`], but also advertises an `outputSchema` (JSON
+    /// Schema for the tool's `Output`) in the tool metadata so MCP clients can
+    /// validate structured results (MCP 2025-06-18). Opt-in: this requires
+    /// `Output: JsonSchema`, so existing `new_typed` callers are unaffected.
+    #[must_use]
+    pub fn new_typed_with_output_schema<Input, Output, Error, Handler>(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        handler: Handler,
+    ) -> Self
+    where
+        Input: DeserializeOwned + JsonSchema + 'static,
+        Output: Serialize + JsonSchema + 'static,
+        Error: StructuredError + 'static,
+        Handler: Fn(&Ctx, Input) -> Result<Output, Error> + Send + Sync + 'static,
+    {
+        let mut tool = Self::new_typed::<Input, Output, Error, Handler>(name, description, handler);
+        tool.metadata.output_schema = Some(
+            serde_json::to_value(schemars::schema_for!(Output))
+                .expect("tool output schema should serialize"),
+        );
+        tool
     }
 
     #[must_use]
@@ -424,6 +454,27 @@ impl<Ctx> ToolRouter<Ctx> {
             description,
             handler,
         ));
+    }
+
+    /// Like [`ToolRouter::add_typed_tool`], but advertises an `outputSchema` for
+    /// the tool's `Output`. Opt-in: requires `Output: JsonSchema`.
+    pub fn add_typed_tool_with_output_schema<Input, Output, Error, Handler>(
+        &mut self,
+        name: impl Into<String>,
+        description: impl Into<String>,
+        handler: Handler,
+    ) where
+        Input: DeserializeOwned + JsonSchema + 'static,
+        Output: Serialize + JsonSchema + 'static,
+        Error: StructuredError + 'static,
+        Handler: Fn(&Ctx, Input) -> Result<Output, Error> + Send + Sync + 'static,
+    {
+        self.add_tool(Tool::new_typed_with_output_schema::<
+            Input,
+            Output,
+            Error,
+            Handler,
+        >(name, description, handler));
     }
 
     #[must_use]
@@ -1570,6 +1621,56 @@ mod tests {
 
         let protocol_error = McpCliError::Protocol("bad frame".to_string());
         assert_eq!(protocol_error.category(), ErrorCategory::Validation);
+    }
+
+    #[derive(Debug, Serialize, JsonSchema)]
+    struct SumOutput {
+        sum: i64,
+    }
+
+    #[test]
+    fn typed_tool_can_advertise_output_schema() {
+        let mut router: ToolRouter<()> = ToolRouter::new();
+        router.add_typed_tool_with_output_schema(
+            "sum",
+            "Add two integers and report the sum.",
+            |(), args: AddArgs| {
+                Ok::<_, SampleError>(SumOutput {
+                    sum: args.lhs + args.rhs,
+                })
+            },
+        );
+        router.add_typed_tool(
+            "echo_plain",
+            "Echo text without an output schema.",
+            |(), args: EchoArgs| Ok::<_, SampleError>(json!({ "text": args.text })),
+        );
+
+        let tools = router.tool_metadata();
+
+        let sum_tool = tools
+            .iter()
+            .find(|tool| tool.name == "sum")
+            .expect("sum tool is registered");
+        let output_schema = sum_tool
+            .output_schema
+            .as_ref()
+            .expect("sum tool advertises an output schema");
+        assert_eq!(output_schema["type"], "object");
+        assert_eq!(output_schema["properties"]["sum"]["type"], "integer");
+
+        // Serialized metadata uses camelCase `outputSchema` when present.
+        let sum_json = serde_json::to_value(sum_tool).expect("tool metadata serializes");
+        assert!(sum_json.get("outputSchema").is_some());
+
+        // A tool registered without an output schema omits the field entirely.
+        let echo_tool = tools
+            .iter()
+            .find(|tool| tool.name == "echo_plain")
+            .expect("echo tool is registered");
+        assert!(echo_tool.output_schema.is_none());
+        let echo_json = serde_json::to_value(echo_tool).expect("tool metadata serializes");
+        assert!(echo_json.get("outputSchema").is_none());
     }
 
     fn frame_request(value: &Value) -> Vec<u8> {

@@ -75,7 +75,8 @@ newline-delimited JSON (NDJSON): one JSON-RPC message per line terminated by
 - `notifications/initialized` — accepted; produces no response.
 - `ping` — replies with an empty result.
 - `tools/list` — returns the router's tool metadata (name, description, input
-  schema).
+  schema, and an optional `outputSchema` for tools registered with
+  `add_typed_tool_with_output_schema`).
 - `tools/call` — runs a typed tool and returns both `structuredContent` (the
   stable `JsonEnvelope`) and a `text` content block, with `isError` reflecting
   tool failures.

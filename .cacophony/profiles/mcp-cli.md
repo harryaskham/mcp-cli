@@ -65,3 +65,7 @@ worker. Additive; extend over time rather than pruning.
   `cacophony` project (e.g. `bd search --project cacophony` errors with
   "worker scope cannot access project 'cacophony'"); route cross-project asks to a
   controller/operator instead.
+- **Do not pipe `cargo fmt --all -- --check` through `tail`/`head`.** A pipeline's
+  exit status is the last command's, so `cargo fmt --check | tail` reports success
+  even when rustfmt found a diff (exit 1). Run the check unpiped and inspect `$?`,
+  or just run `cargo fmt --all` and `git diff` before committing.
