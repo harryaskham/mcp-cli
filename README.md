@@ -62,6 +62,31 @@ let server = McpServer::new(
 For CLI commands, use `write_json_result` or `write_json_result_ref` to emit the
 same stable envelope shape that MCP `tools/call` returns as structured content.
 
+## MCP protocol support
+
+`McpServer::serve_stdio` (and `serve_transport`) speak MCP over stdio using
+newline-delimited JSON (NDJSON): one JSON-RPC message per line terminated by
+`\n`, with blank separator lines tolerated. Supported methods:
+
+- `initialize` — negotiates the protocol version: the client's requested
+  `protocolVersion` is echoed when supported, otherwise the server advertises its
+  latest supported version. The supported set is the `SUPPORTED_PROTOCOL_VERSIONS`
+  constant.
+- `notifications/initialized` — accepted; produces no response.
+- `ping` — replies with an empty result.
+- `tools/list` — returns the router's tool metadata (name, description, input
+  schema).
+- `tools/call` — runs a typed tool and returns both `structuredContent` (the
+  stable `JsonEnvelope`) and a `text` content block, with `isError` reflecting
+  tool failures.
+
+Malformed-but-parseable input is answered with a JSON-RPC error while the session
+keeps serving, rather than tearing the connection down:
+
+- `-32600` Invalid Request — JSON that is not a valid JSON-RPC request object.
+- `-32601` Method not found — an unknown MCP method.
+- `-32602` Invalid params — a `tools/call` whose params do not deserialize.
+
 ## Development
 
 ```bash
