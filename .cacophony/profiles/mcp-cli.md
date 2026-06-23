@@ -69,3 +69,21 @@ worker. Additive; extend over time rather than pruning.
   exit status is the last command's, so `cargo fmt --check | tail` reports success
   even when rustfmt found a diff (exit 1). Run the check unpiped and inspect `$?`,
   or just run `cargo fmt --all` and `git diff` before committing.
+- **Maintenance-window flaps are expected, not product bugs.** During fleet-wide
+  node outages / Nix-update / TLS-restart windows you will see transient
+  `beads proxy to the active primary is temporarily unavailable`,
+  `endpoint failed before any semantic response`, and `msg send` backpressure /
+  `accept_timeout`. Treat these as expected: do one bounded retry (or just wait
+  for the next idle tick); do not tight-loop and do not file them as bugs.
+- **Recurring fleet broadcasts are usually not your work.** Global broadcasts like
+  `Continue on current goals, or disregard if not relevant`, `continue if you are
+  mid-work`, and infra/PR-mode/Nix-cache status notes are not mcp-cli-directed.
+  When you have no in-flight goal and an empty queue, disregard them quietly
+  without spamming speak; only act on messages that name mcp-cli or a directed
+  task.
+- **Heavy context: self-improve then /self-compact, don't recreate.** Operator
+  guidance (helsinki:cacophony:harry): when context is heavy, prefer
+  `/self-compact` over agent recreation. Use the rich context first to capture
+  profile fixes / notes / draft beads, then `/self-compact` to continue. This is
+  consistent with the endless mixin's "do not self-initiate a handoff/recreation"
+  rule — `/self-compact` is runtime compaction, not a fresh-agent handoff.
