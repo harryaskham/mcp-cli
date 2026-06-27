@@ -71,7 +71,7 @@ pub const JSON_SCHEMA_VERSION: u32 = 1;
 pub const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2024-11-05", "2025-03-26", "2025-06-18"];
 
 /// Stable categories for structured JSON and MCP errors.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCategory {
     Validation,
@@ -87,7 +87,7 @@ pub enum ErrorCategory {
 }
 
 /// Stable metadata attached to every machine-readable response envelope.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct EnvelopeMeta {
     pub schema_version: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -127,7 +127,7 @@ pub trait StructuredError {
 }
 
 /// Structured error payload shared by CLI and MCP surfaces.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct JsonError {
     pub category: ErrorCategory,
     pub code: String,
@@ -189,7 +189,7 @@ impl StructuredError for JsonError {
 }
 
 /// Structured success/error envelope for machine-readable command responses.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum JsonEnvelope<T> {
     Success {
@@ -382,10 +382,13 @@ impl<Ctx> Tool<Ctx> {
         }
     }
 
-    /// Like [`Tool::new_typed`], but also advertises an `outputSchema` (JSON
-    /// Schema for the tool's `Output`) in the tool metadata so MCP clients can
-    /// validate structured results (MCP 2025-06-18). Opt-in: this requires
-    /// `Output: JsonSchema`, so existing `new_typed` callers are unaffected.
+    /// Like [`Tool::new_typed`], but also advertises an `outputSchema` in the
+    /// tool metadata so MCP clients can validate structured results (MCP
+    /// 2025-06-18). Because `tools/call` returns `structuredContent` as the
+    /// [`JsonEnvelope`] wrapping `Output`, the advertised schema describes that
+    /// envelope (`status`/`meta`/`data`), so structuredContent conforms to it.
+    /// Opt-in: this requires `Output: JsonSchema`, so existing `new_typed`
+    /// callers are unaffected.
     #[must_use]
     pub fn new_typed_with_output_schema<Input, Output, Error, Handler>(
         name: impl Into<String>,
@@ -399,8 +402,12 @@ impl<Ctx> Tool<Ctx> {
         Handler: Fn(&Ctx, Input) -> Result<Output, Error> + Send + Sync + 'static,
     {
         let mut tool = Self::new_typed::<Input, Output, Error, Handler>(name, description, handler);
+        // structuredContent is always the JsonEnvelope wrapping `Output`, so the
+        // advertised outputSchema must describe that envelope (status/meta/data),
+        // not the bare `Output` — otherwise a client validating structuredContent
+        // against outputSchema would reject conformant responses (bd-870183).
         tool.metadata.output_schema = Some(
-            serde_json::to_value(schemars::schema_for!(Output))
+            serde_json::to_value(schemars::schema_for!(JsonEnvelope<Output>))
                 .expect("tool output schema should serialize"),
         );
         tool
@@ -1656,8 +1663,23 @@ mod tests {
             .output_schema
             .as_ref()
             .expect("sum tool advertises an output schema");
-        assert_eq!(output_schema["type"], "object");
-        assert_eq!(output_schema["properties"]["sum"]["type"], "integer");
+        // structuredContent is the JsonEnvelope wrapping Output, so the advertised
+        // schema must describe that envelope rather than the bare Output. Assert
+        // the envelope discriminator/fields and the Output field all appear,
+        // tolerant of schemars' exact $ref/oneOf layout.
+        let schema_text = serde_json::to_string(output_schema).expect("schema serializes");
+        assert!(
+            schema_text.contains("status"),
+            "envelope status discriminator present: {schema_text}"
+        );
+        assert!(
+            schema_text.contains("\"data\""),
+            "envelope data field present: {schema_text}"
+        );
+        assert!(
+            schema_text.contains("sum"),
+            "Output `sum` surfaced under the envelope data: {schema_text}"
+        );
 
         // Serialized metadata uses camelCase `outputSchema` when present.
         let sum_json = serde_json::to_value(sum_tool).expect("tool metadata serializes");
@@ -1671,6 +1693,53 @@ mod tests {
         assert!(echo_tool.output_schema.is_none());
         let echo_json = serde_json::to_value(echo_tool).expect("tool metadata serializes");
         assert!(echo_json.get("outputSchema").is_none());
+    }
+
+    #[test]
+    fn advertised_output_schema_describes_tools_call_structured_content() {
+        // Every top-level key a real tools/call emits in structuredContent must be
+        // named in the advertised outputSchema, proving the two describe the same
+        // shape (the JsonEnvelope wrapping Output) rather than diverging (bd-870183).
+        let mut router: ToolRouter<()> = ToolRouter::new();
+        router.add_typed_tool_with_output_schema(
+            "sum",
+            "Add two integers and report the sum.",
+            |(), args: AddArgs| {
+                Ok::<_, SampleError>(SumOutput {
+                    sum: args.lhs + args.rhs,
+                })
+            },
+        );
+
+        let schema_text = {
+            let tools = router.tool_metadata();
+            let sum_tool = tools
+                .iter()
+                .find(|tool| tool.name == "sum")
+                .expect("sum tool is registered");
+            serde_json::to_string(
+                sum_tool
+                    .output_schema
+                    .as_ref()
+                    .expect("sum tool advertises an output schema"),
+            )
+            .expect("schema serializes")
+        };
+
+        let envelope = router.call_tool(&(), "sum", json!({ "lhs": 2, "rhs": 3 }));
+        let structured = serde_json::to_value(&envelope).expect("envelope serializes");
+        let object = structured
+            .as_object()
+            .expect("structuredContent is an object");
+        for key in object.keys() {
+            assert!(
+                schema_text.contains(key.as_str()),
+                "structuredContent key `{key}` is described by the advertised schema: {schema_text}"
+            );
+        }
+        // And the success payload really is the envelope shape we advertise.
+        assert_eq!(structured["status"], "success");
+        assert_eq!(structured["data"]["sum"], 5);
     }
 
     #[test]
