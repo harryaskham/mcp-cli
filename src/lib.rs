@@ -1673,6 +1673,72 @@ mod tests {
         assert!(echo_json.get("outputSchema").is_none());
     }
 
+    #[test]
+    fn stdio_server_reinitialize_is_idempotent_and_keeps_serving() {
+        // Reconnect-safe contract: the stateless server answers a repeated
+        // `initialize` (including a re-initialize after notifications/initialized)
+        // without rejecting the same session, and keeps serving afterwards. This
+        // is the reference behavior a same-agent MCP reconnect should rely on.
+        let server = McpServer::new(
+            StdioServerConfig {
+                server_name: "sample-mcp".to_string(),
+                server_version: "0.0.1".to_string(),
+            },
+            build_math_router(),
+        );
+
+        let input = [
+            frame_request(&json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": { "protocolVersion": "2024-11-05" }
+            })),
+            frame_request(&json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/initialized"
+            })),
+            // Re-initialize on the same session must still be acknowledged.
+            frame_request(&json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "initialize",
+                "params": { "protocolVersion": "2024-11-05" }
+            })),
+            // The session must keep serving subsequent requests after re-init.
+            frame_request(&json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "ping",
+                "params": {}
+            })),
+        ]
+        .concat();
+
+        let mut output = Vec::new();
+        server
+            .serve_transport(&(), std::io::Cursor::new(input), &mut output)
+            .expect("re-initialize must not tear down the session");
+
+        let responses = parse_framed_responses(&output);
+        // initialize(id=1), initialize(id=2), ping(id=3); the notification yields none.
+        assert_eq!(responses.len(), 3);
+
+        assert_eq!(responses[0]["id"], 1);
+        assert_eq!(responses[0]["result"]["serverInfo"]["name"], "sample-mcp");
+        assert_eq!(responses[0]["result"]["protocolVersion"], "2024-11-05");
+
+        // The re-initialize is acknowledged idempotently (no 'already initialized' error).
+        assert_eq!(responses[1]["id"], 2);
+        assert!(responses[1].get("error").is_none());
+        assert_eq!(responses[1]["result"]["serverInfo"]["name"], "sample-mcp");
+        assert_eq!(responses[1]["result"]["protocolVersion"], "2024-11-05");
+
+        // The session survived the reconnect handshake and answered the next request.
+        assert_eq!(responses[2]["id"], 3);
+        assert_eq!(responses[2]["result"], json!({}));
+    }
+
     fn frame_request(value: &Value) -> Vec<u8> {
         let mut message = serde_json::to_vec(value).expect("request should serialize");
         message.push(b'\n');
