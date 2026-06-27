@@ -499,7 +499,10 @@ impl<Ctx> ToolRouter<Ctx> {
             None => JsonEnvelope::error_for(
                 name,
                 JsonError::new(
-                    ErrorCategory::Validation,
+                    // A missing tool name is a not-found condition, not malformed
+                    // input: classify it as TargetNotFound so consumers routing on
+                    // ErrorCategory can distinguish it from validation errors.
+                    ErrorCategory::TargetNotFound,
                     "unknown_tool",
                     format!("unknown tool `{name}`"),
                 ),
@@ -1441,6 +1444,11 @@ mod tests {
         assert_eq!(
             responses[0]["result"]["structuredContent"]["error"]["code"],
             "unknown_tool"
+        );
+        // A missing tool name is a not-found condition, not a validation failure.
+        assert_eq!(
+            responses[0]["result"]["structuredContent"]["error"]["category"],
+            "target_not_found"
         );
 
         // Arguments that fail typed validation also surface as isError with a
