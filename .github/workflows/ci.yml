@@ -13,15 +13,16 @@ on:
 jobs:
   check:
     # x86/Linux validation on the azure-ephemeral self-hosted runner pool.
+    # The runners ship Nix + flakes but no bare toolchain on PATH, so every
+    # command runs inside the flake's default devshell (nix develop), which
+    # provides cargo/rustc/clippy/rustfmt — no toolchain action or custom
+    # runner image required.
     runs-on: [self-hosted, azure-ephemeral]
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
       - name: Format
-        run: cargo fmt --all -- --check
+        run: nix develop --command cargo fmt --all -- --check
       - name: Clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: nix develop --command cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Test
-        run: cargo test --workspace --all-features
+        run: nix develop --command cargo test --workspace --all-features
