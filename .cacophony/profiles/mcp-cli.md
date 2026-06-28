@@ -49,6 +49,21 @@ worker. Additive; extend over time rather than pruning.
   request timeout while the merge actually lands. Do NOT blindly retry: first run
   `git fetch origin main -q && git log origin/main --oneline --grep=<bead-id>`. If
   the squash commit is present, the reintegration succeeded — proceed to close.
+- **`origin` is the daemon-local mirror, not GitHub — verify load-sensitive
+  landings on TRUE GitHub main.** This checkout's `origin` is
+  `~/.cacophony/daemon/checkouts/mcp-cli` (a local mirror), so
+  `git log origin/main --grep` can confirm against the mirror yet still miss a
+  push to true GitHub. For a land that timed out / happened under load, also
+  verify the canonical upstream: `git ls-remote
+  ssh://git@github.com/harryaskham/mcp-cli.git refs/heads/main` and/or `gh api
+  repos/harryaskham/mcp-cli/compare/main...<sha>` (compare status `identical` or
+  `behind` = landed; `ahead`/`diverged` = NOT landed).
+- **Always reintegrate SYNCHRONOUSLY; never `--async`.** Under host load
+  `caco agent reintegrate --async` can SILENTLY FALSE-LAND — the detached process
+  goes defunct, never registers in the merge-queue, and the agent falsely reports
+  "landed" while the commit is never pushed (cluster-ctrl P1; fix bd-9a0041). Plain
+  synchronous `caco agent reintegrate` lands cleanly even when the MCP response
+  times out. Do not pass `--async` for reintegration.
 - **Close-validator can 412 even when the work landed.** `caco bd close` may fail
   with `mainline_validation_failed` / upstream 412 "project checkout not available
   for mcp-cli" (authority-node infra), not a missing commit. After verifying the
