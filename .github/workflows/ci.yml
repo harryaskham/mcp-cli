@@ -1,0 +1,27 @@
+name: CI
+
+# Manual-dispatch only for now: this lands the azure-ephemeral runner config
+# without queuing any job before the self-hosted runner pool is live. Add the
+# push / pull_request triggers below once the runners are up (bd-f023df).
+on:
+  workflow_dispatch:
+  # push:
+  #   branches: [main]
+  # pull_request:
+  #   branches: [main]
+
+jobs:
+  check:
+    # x86/Linux validation on the azure-ephemeral self-hosted runner pool.
+    runs-on: [self-hosted, azure-ephemeral]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Test
+        run: cargo test --workspace --all-features
