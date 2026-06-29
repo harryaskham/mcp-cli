@@ -96,6 +96,7 @@ worker. Additive; extend over time rather than pruning.
   When you have no in-flight goal and an empty queue, disregard them quietly
   without spamming speak; only act on messages that name mcp-cli or a directed
   task.
+- **PR-mode reintegration is permitted; CI is the gate (operator, 2026-06-29).** Harry: dev re-ints CAN use PR mode and the local cargo gate is not the right place — a GitHub Action keeps main green. For mcp-cli, prefer `caco agent reintegrate --mode pr_auto_merge` once the repo has CI runners. Until then mcp-cli has ZERO self-hosted runners (`gh api repos/harryaskham/mcp-cli/actions/runners` => total 0) and ci.yml stays `workflow_dispatch`-only; enabling push/pull_request triggers without runners would leave every check pending forever. Flip triggers + switch to PR mode together when mcp-cli joins the azure-ephemeral pool. One agent owns this; do not swarm.
 - **Heavy context: self-improve then /self-compact, don't recreate.** Operator
   guidance (helsinki:cacophony:harry): when context is heavy, prefer
   `/self-compact` over agent recreation. Use the rich context first to capture

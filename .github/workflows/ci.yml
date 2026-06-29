@@ -3,6 +3,9 @@ name: CI
 # Manual-dispatch only for now: this lands the azure-ephemeral runner config
 # without queuing any job before the self-hosted runner pool is live. Add the
 # push / pull_request triggers below once the runners are up (bd-f023df).
+# Dev reintegration moves to PR + CI gate when this flips; until mcp-cli has
+# runners (gh api repos/harryaskham/mcp-cli/actions/runners => 0) enabling
+# triggers would leave PR checks pending forever, so keep dispatch-only (bd-bfebfc).
 on:
   workflow_dispatch:
   # push:
