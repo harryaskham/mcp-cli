@@ -1,25 +1,32 @@
 name: CI
 
-# Manual-dispatch only for now: this lands the azure-ephemeral runner config
-# without queuing any job before the self-hosted runner pool is live. Add the
-# push / pull_request triggers below once the runners are up (bd-f023df).
-# Dev reintegration moves to PR + CI gate when this flips; until mcp-cli has
-# runners (gh api repos/harryaskham/mcp-cli/actions/runners => 0) enabling
-# triggers would leave PR checks pending forever, so keep dispatch-only (bd-bfebfc).
+# GitHub-hosted CI gate for the auto-merge cutover (bd-bcb4b8).
+#
+# mcp-cli is a public personal-account repo, so ubuntu-latest hosted runners are
+# free and need no self-hosted pool. GitHub merge queue requires an org, so it is
+# unavailable here for now; instead we gate auto-merge on this required check.
+#
+# Triggers:
+#   - pull_request: the required green check that auto-merge waits on.
+#   - push to main: validates the trunk and registers the check context so it can
+#     be required in branch protection.
+#   - merge_group: ready for GitHub merge queue if mcp-cli ever moves under an org
+#     (the queue builds gh-readonly-queue/* refs; without this it would wedge PRs).
+#   - workflow_dispatch: manual runs.
+#
+# Validation stays rust-not-nix (plain cargo via dtolnay/rust-toolchain); flake.nix
+# remains a contributor dev-shell convenience and is not used by CI.
 on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  merge_group:
   workflow_dispatch:
-  # push:
-  #   branches: [main]
-  # pull_request:
-  #   branches: [main]
 
 jobs:
   check:
-    # x86/Linux validation on the azure-ephemeral self-hosted runner pool.
-    # Plain cargo (rust-not-nix): the toolchain comes from rust-toolchain, which
-    # avoids the multi-GB Nix download per ephemeral job. flake.nix stays as a
-    # contributor dev-shell convenience but is not used by CI.
-    runs-on: [self-hosted, azure-ephemeral]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
