@@ -103,6 +103,21 @@ the cap per server:
 let server = McpServer::new(config, router).with_max_frame_bytes(1024 * 1024);
 ```
 
+### Batch requests
+
+A frame containing a JSON array is handled as a JSON-RPC batch: every member is
+executed and the responses come back as one array frame in request order.
+Members that are notifications (no `id`) are omitted from the array, a batch of
+only notifications produces no response frame at all, and an empty array is
+answered with a single `-32600` object rather than an array (JSON-RPC 2.0
+section 6). A malformed member gets its own `-32600` entry without affecting its
+siblings.
+
+MCP `2025-03-26` requires implementations to be able to *receive* batches;
+`2025-06-18` removed batching. Batches are accepted on any negotiated version:
+that is simpler than gating the transport on the handshake, and a client that
+never batches is unaffected.
+
 ## Development
 
 ```bash

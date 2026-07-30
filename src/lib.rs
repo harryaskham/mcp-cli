@@ -570,7 +570,54 @@ impl<Ctx> McpServer<Ctx> {
         self.router.tool_metadata()
     }
 
+    /// Handle one parsed JSON-RPC value: a single request object, or a batch
+    /// array of them.
+    ///
+    /// Batches are answered as an array of the member responses in request
+    /// order, with notification members omitted; a notification-only batch
+    /// produces no response at all (`Ok(None)`). An empty array is itself an
+    /// Invalid Request and is answered with a single `-32600` object rather
+    /// than an array, as required by JSON-RPC 2.0 section 6.
     pub fn handle_request_value(
+        &self,
+        ctx: &Ctx,
+        request: Value,
+    ) -> Result<Option<Value>, McpCliError> {
+        // MCP 2025-03-26 requires implementations to be able to RECEIVE JSON-RPC
+        // batches; 2025-06-18 removed batching. Accepting a batch on any
+        // negotiated version is the tolerant, simpler choice: a client that
+        // never batches is unaffected, and a 2025-03-26 client is not answered
+        // with a single error for an entire warm-up batch.
+        if let Value::Array(members) = request {
+            return self.handle_batch(ctx, members);
+        }
+
+        self.handle_single_request_value(ctx, request)
+    }
+
+    fn handle_batch(&self, ctx: &Ctx, members: Vec<Value>) -> Result<Option<Value>, McpCliError> {
+        if members.is_empty() {
+            // JSON-RPC 2.0 section 6: an empty batch array is an Invalid
+            // Request answered with a single response object, not an array.
+            return Ok(Some(empty_batch_response()));
+        }
+
+        let mut responses = Vec::with_capacity(members.len());
+        for member in members {
+            if let Some(response) = self.handle_single_request_value(ctx, member)? {
+                responses.push(response);
+            }
+        }
+
+        // A batch of only notifications produces no response frame at all.
+        if responses.is_empty() {
+            return Ok(None);
+        }
+
+        Ok(Some(Value::Array(responses)))
+    }
+
+    fn handle_single_request_value(
         &self,
         ctx: &Ctx,
         request: Value,
@@ -840,6 +887,22 @@ fn parse_error_response(error: &serde_json::Error) -> Value {
         "error": {
             "code": -32700,
             "message": format!("parse error: {error}")
+        }
+    })
+}
+
+/// Build the JSON-RPC `-32600 Invalid Request` response for an empty batch
+/// array.
+///
+/// JSON-RPC 2.0 section 6 specifies a single response object here (not an
+/// array) with a null id, because there is no member to answer.
+fn empty_batch_response() -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": Value::Null,
+        "error": {
+            "code": -32600,
+            "message": "invalid JSON-RPC request: batch array is empty"
         }
     })
 }
@@ -2167,6 +2230,168 @@ mod tests {
         // The session survived the reconnect handshake and answered the next request.
         assert_eq!(responses[2]["id"], 3);
         assert_eq!(responses[2]["result"], json!({}));
+    }
+
+    fn sample_server() -> McpServer<()> {
+        McpServer::new(
+            StdioServerConfig {
+                server_name: "sample-mcp".to_string(),
+                server_version: "0.0.1".to_string(),
+            },
+            build_math_router(),
+        )
+    }
+
+    #[test]
+    fn stdio_server_answers_a_batch_with_an_ordered_array_of_responses() {
+        // MCP 2025-03-26 requires implementations to be able to RECEIVE JSON-RPC
+        // batches. Every member runs and the responses come back in request
+        // order as a single array frame (JSON-RPC 2.0 section 6).
+        let server = sample_server();
+
+        let input = frame_request(&json!([
+            { "jsonrpc": "2.0", "id": 1, "method": "ping" },
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": { "name": "math_add", "arguments": { "lhs": 2, "rhs": 3 } }
+            },
+            { "jsonrpc": "2.0", "id": 3, "method": "tools/list" }
+        ]));
+
+        let mut output = Vec::new();
+        server
+            .serve_transport(&(), std::io::Cursor::new(input), &mut output)
+            .expect("a batch must be served");
+
+        let frames = parse_framed_responses(&output);
+        assert_eq!(frames.len(), 1, "a batch is answered in one frame");
+
+        let responses = frames[0].as_array().expect("batch response is an array");
+        assert_eq!(responses.len(), 3);
+        assert_eq!(responses[0]["id"], 1);
+        assert_eq!(responses[0]["result"], json!({}));
+        assert_eq!(responses[1]["id"], 2);
+        assert_eq!(
+            responses[1]["result"]["structuredContent"]["data"]["sum"],
+            5
+        );
+        assert_eq!(responses[2]["id"], 3);
+        assert_eq!(responses[2]["result"]["tools"][0]["name"], "math_add");
+    }
+
+    #[test]
+    fn stdio_server_batch_omits_notification_members_and_keeps_serving() {
+        // Notifications carry no id and get no response, so they are omitted
+        // from the batch array while their siblings are still answered. The
+        // session then serves the next frame normally.
+        let server = sample_server();
+
+        let mut input = frame_request(&json!([
+            { "jsonrpc": "2.0", "method": "notifications/initialized" },
+            { "jsonrpc": "2.0", "id": 9, "method": "ping" }
+        ]));
+        input.extend_from_slice(&frame_request(&json!({
+            "jsonrpc": "2.0",
+            "id": 10,
+            "method": "ping"
+        })));
+
+        let mut output = Vec::new();
+        server
+            .serve_transport(&(), std::io::Cursor::new(input), &mut output)
+            .expect("a batch with notifications must be served");
+
+        let frames = parse_framed_responses(&output);
+        assert_eq!(frames.len(), 2, "frames: {frames:?}");
+
+        let responses = frames[0].as_array().expect("batch response is an array");
+        assert_eq!(responses.len(), 1, "the notification is omitted");
+        assert_eq!(responses[0]["id"], 9);
+
+        assert_eq!(frames[1]["id"], 10);
+        assert_eq!(frames[1]["result"], json!({}));
+    }
+
+    #[test]
+    fn stdio_server_notification_only_batch_produces_no_response_frame() {
+        let server = sample_server();
+
+        let input = frame_request(&json!([
+            { "jsonrpc": "2.0", "method": "notifications/initialized" },
+            { "jsonrpc": "2.0", "method": "notifications/initialized" }
+        ]));
+
+        let mut output = Vec::new();
+        server
+            .serve_transport(&(), std::io::Cursor::new(input), &mut output)
+            .expect("a notification-only batch must be served");
+
+        assert!(
+            output.is_empty(),
+            "a notification-only batch gets no response: {:?}",
+            String::from_utf8_lossy(&output)
+        );
+    }
+
+    #[test]
+    fn stdio_server_empty_batch_returns_a_single_invalid_request_object() {
+        // JSON-RPC 2.0 section 6: an empty batch array is itself an Invalid
+        // Request, answered with one response object rather than an array.
+        let server = sample_server();
+
+        let mut output = Vec::new();
+        server
+            .serve_transport(
+                &(),
+                std::io::Cursor::new(frame_request(&json!([]))),
+                &mut output,
+            )
+            .expect("an empty batch must not end the session");
+
+        let frames = parse_framed_responses(&output);
+        assert_eq!(frames.len(), 1);
+        assert!(
+            !frames[0].is_array(),
+            "empty batch is answered with a single object: {:?}",
+            frames[0]
+        );
+        assert_eq!(frames[0]["id"], Value::Null);
+        assert_eq!(frames[0]["error"]["code"], -32600);
+    }
+
+    #[test]
+    fn stdio_server_batch_reports_invalid_members_without_dropping_valid_ones() {
+        // A malformed member gets its own -32600 entry; its siblings still run.
+        let server = sample_server();
+
+        let input = frame_request(&json!([
+            { "jsonrpc": "2.0", "id": 1, "missing": "method" },
+            { "jsonrpc": "2.0", "id": 2, "method": "ping" },
+            "not even an object"
+        ]));
+
+        let mut output = Vec::new();
+        server
+            .serve_transport(&(), std::io::Cursor::new(input), &mut output)
+            .expect("a partially invalid batch must be served");
+
+        let frames = parse_framed_responses(&output);
+        assert_eq!(frames.len(), 1);
+
+        let responses = frames[0].as_array().expect("batch response is an array");
+        assert_eq!(responses.len(), 3, "responses: {responses:?}");
+
+        assert_eq!(responses[0]["id"], 1);
+        assert_eq!(responses[0]["error"]["code"], -32600);
+
+        assert_eq!(responses[1]["id"], 2);
+        assert_eq!(responses[1]["result"], json!({}));
+
+        // A non-object member has no recoverable id, so it answers with null.
+        assert_eq!(responses[2]["id"], Value::Null);
+        assert_eq!(responses[2]["error"]["code"], -32600);
     }
 
     fn frame_request(value: &Value) -> Vec<u8> {
