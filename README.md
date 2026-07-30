@@ -84,9 +84,10 @@ newline-delimited JSON (NDJSON): one JSON-RPC message per line terminated by
   stable `JsonEnvelope`) and a `text` content block, with `isError` reflecting
   tool failures.
 
-Malformed-but-parseable input is answered with a JSON-RPC error while the session
-keeps serving, rather than tearing the connection down:
+Malformed input is answered with a JSON-RPC error while the session keeps
+serving, rather than tearing the connection down:
 
+- `-32700` Parse error — a frame that is not valid JSON (`id` is `null`).
 - `-32600` Invalid Request — JSON that is not a valid JSON-RPC request object.
 - `-32601` Method not found — an unknown MCP method.
 - `-32602` Invalid params — a `tools/call` whose params do not deserialize.

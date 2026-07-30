@@ -566,7 +566,14 @@ impl<Ctx> McpServer<Ctx> {
         W: Write,
     {
         while let Some(message) = read_protocol_message(&mut reader)? {
-            let response = self.handle_request_value(ctx, serde_json::from_slice(&message)?)?;
+            // A frame that is not valid JSON at all is a JSON-RPC Parse error.
+            // Answer with `-32700` and keep serving: a single malformed line
+            // from a noisy or buggy peer must not tear down a long-lived stdio
+            // session, consistent with the `-32600` / `-32602` handling below.
+            let response = match serde_json::from_slice::<Value>(&message) {
+                Ok(value) => self.handle_request_value(ctx, value)?,
+                Err(error) => Some(parse_error_response(&error)),
+            };
             if let Some(response) = response {
                 write_protocol_message(&mut writer, &response)?;
             }
@@ -745,6 +752,22 @@ fn negotiate_protocol_version(requested: Option<&str>) -> &'static str {
             .unwrap_or(latest),
         None => latest,
     }
+}
+
+/// Build a JSON-RPC `-32700 Parse error` response for a frame that is not
+/// valid JSON.
+///
+/// The `id` is always `null`: the request could not be parsed, so no id is
+/// recoverable from it, as required by JSON-RPC 2.0.
+fn parse_error_response(error: &serde_json::Error) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": Value::Null,
+        "error": {
+            "code": -32700,
+            "message": format!("parse error: {error}")
+        }
+    })
 }
 
 /// Build a JSON-RPC `-32600 Invalid Request` response for a value that parsed
@@ -1371,9 +1394,11 @@ mod tests {
     }
 
     #[test]
-    fn stdio_server_rejects_non_json_input_instead_of_hanging() {
+    fn stdio_server_answers_non_json_input_with_parse_error_and_keeps_serving() {
         // Regression: typing arbitrary text into the stdio transport must surface
-        // a JSON error rather than silently consuming it (which previously hung).
+        // a JSON-RPC `-32700` parse error rather than silently consuming it
+        // (which previously hung) or tearing down the session (which previously
+        // returned `Err(McpCliError::Json)` and dropped every later message).
         let server = McpServer::new(
             StdioServerConfig {
                 server_name: "sample-mcp".to_string(),
@@ -1382,17 +1407,65 @@ mod tests {
             build_math_router(),
         );
 
+        let mut input = b"hello there\n".to_vec();
+        input.extend_from_slice(&frame_request(&json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "ping"
+        })));
+
         let mut output = Vec::new();
-        let result = server.serve_transport(
-            &(),
-            std::io::Cursor::new(b"hello there\n".to_vec()),
-            &mut output,
+        server
+            .serve_transport(&(), std::io::Cursor::new(input), &mut output)
+            .expect("a malformed frame must not end the session");
+
+        let responses = parse_framed_responses(&output);
+        assert_eq!(responses.len(), 2);
+        assert_eq!(responses[0]["jsonrpc"], "2.0");
+        assert_eq!(responses[0]["error"]["code"], -32700);
+        assert_eq!(responses[0]["id"], Value::Null);
+        // The session keeps serving: the request after the garbage line is answered.
+        assert_eq!(responses[1]["id"], 7);
+        assert_eq!(responses[1]["result"], json!({}));
+    }
+
+    #[test]
+    fn stdio_server_parse_error_does_not_consume_following_frames_silently() {
+        // A truncated JSON object is a parse error, not an invalid request:
+        // it must not be reported as `-32600`, and the frame after it still runs.
+        let server = McpServer::new(
+            StdioServerConfig {
+                server_name: "sample-mcp".to_string(),
+                server_version: "0.0.1".to_string(),
+            },
+            build_math_router(),
         );
 
-        match result {
-            Err(McpCliError::Json(_)) => {}
-            other => panic!("expected a JSON parse error on garbage input, got {other:?}"),
-        }
+        let mut input = b"{\"jsonrpc\": \"2.0\", \"id\": 1, \"method\":\n".to_vec();
+        input.extend_from_slice(&frame_request(&json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "math_add",
+                "arguments": { "lhs": 2, "rhs": 3 }
+            }
+        })));
+
+        let mut output = Vec::new();
+        server
+            .serve_transport(&(), std::io::Cursor::new(input), &mut output)
+            .expect("a truncated frame must not end the session");
+
+        let responses = parse_framed_responses(&output);
+        assert_eq!(responses.len(), 2);
+        assert_eq!(responses[0]["error"]["code"], -32700);
+        assert_eq!(responses[0]["id"], Value::Null);
+        assert_eq!(
+            responses[1]["result"]["structuredContent"]["data"]["sum"],
+            5
+        );
+        assert_eq!(responses[1]["result"]["isError"], false);
     }
 
     #[test]
