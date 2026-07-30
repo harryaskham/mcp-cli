@@ -97,6 +97,39 @@ worker. Additive; extend over time rather than pruning.
   without spamming speak; only act on messages that name mcp-cli or a directed
   task.
 - **CI gate is LIVE; PR backend is intended-default but BLOCKED on operator config (2026-06-29).** Harry directed: switch to PR mode, prefer PR auto-merge when available, gate may be temporarily disabled if it causes problems. State: CI (`.github/workflows/ci.yml`, bd-bcb4b8) runs cargo fmt/clippy/test on GitHub-hosted `ubuntu-latest` (public personal-account repo — no self-hosted pool needed), on `pull_request`+`push`+`merge_group`, green. Branch protection on `main` requires the `check` context (strict, `enforce_admins=false` escape hatch); `allow_auto_merge`+`allow_update_branch` enabled. PR landing uses `caco agent reintegrate --backend pull_request` (bd-c949e1) — dry-run is CLEAN — BUT real runs error `bd-1d514b: project 'mcp-cli' uses pull_request backend ... but projects[].integration is missing`. That `projects[].integration` config lives in the cacophony project; this worker is scope-bound to mcp-cli and CANNOT add it — an operator/controller must. DO NOT use `--mode pr_auto_merge` (daemon dead-code, bd-d58da8). UNTIL integration config is added, reintegrate via `caco agent reintegrate --backend local_merge` (direct merge; works). GitHub merge queue needs an org (unavailable); `merge_group` is pre-wired. One agent owns this; do not swarm.
+- **Two workers share this project — on a drained board, self-filed work
+  DUPLICATES.** Observed 2026-07-30: with an empty ready board, `ms-dev-3` and
+  `ms-dev-4` independently found the same defect and both implemented it; the
+  `-32700` parse-error fix was filed twice (bd-8afbc4 / bd-9171bc) and the loser
+  discarded a complete, green implementation at the rebase. Self-improvement on a
+  drained board is correct, but it is NOT solo work. Before implementing:
+  `caco msg broadcast` the exact area you are taking, check
+  `caco bd list --status in_progress` for the other worker's claim, and re-run
+  `git fetch origin main && git log origin/main --oneline -5` immediately before
+  deep implementation. Yield and close as concurrently-resolved (admin override,
+  no commits) rather than re-landing a sibling fix.
+- **`assignment source was first_class, not bead_store_reconciled` is a
+  maintenance-window symptom, not a product bug.** `caco agent reintegrate` fails
+  with `reintegration_assignment_binding_unavailable` (no publication attempted)
+  while the beads primary is unreachable, because the local claim has not been
+  reconciled into the authoritative bead store. The signal that it will bind
+  again is a successful `caco bd sync`. Wait for that, then retry; do not file it.
+- **`caco bd create` queues to the daemon outbox when the primary is down.** It
+  returns `queued: ... outbox entry outbox-...` with NO bead id. The work can
+  still proceed: commit with a bead-id-pending message and `git commit --amend`
+  the id in once the outbox drains (poll with
+  `caco bd list --assignee $CACO_AGENT_ID --status in_progress`). Reintegration
+  cannot bind an assignment until the bead exists, so the amend must happen first.
+- **`caco scratch append --text` rejects a value starting with `-`.** The leading
+  dash is parsed as a flag (`error: unsupported flag: - start ...`). Start health
+  note entries with a bracketed timestamp instead of a Markdown bullet dash.
+- **PR-backend blocker is UNVERIFIED as of 2026-07-30.** A `--backend
+  pull_request` attempt this session failed earlier in the pipeline (assignment
+  binding, during a beads outage), so the previously documented
+  `projects[].integration is missing` error was never reached and is neither
+  confirmed nor refuted. `--backend local_merge` lands cleanly and CI stays green
+  on the resulting push. Re-probe the PR backend when the fleet is healthy before
+  assuming either state.
 - **Heavy context: self-improve then /self-compact, don't recreate.** Operator
   guidance (helsinki:cacophony:harry): when context is heavy, prefer
   `/self-compact` over agent recreation. Use the rich context first to capture
