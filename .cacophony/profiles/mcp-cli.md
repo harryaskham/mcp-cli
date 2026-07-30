@@ -130,6 +130,25 @@ worker. Additive; extend over time rather than pruning.
   confirmed nor refuted. `--backend local_merge` lands cleanly and CI stays green
   on the resulting push. Re-probe the PR backend when the fleet is healthy before
   assuming either state.
+- **`incident-hold admission unavailable (HTTP 503, fail closed)` is the other
+  half of the same outage.** When the authority node is down, `caco agent
+  reintegrate` alternates between
+  `reintegration_assignment_binding_unavailable` (assignment source was
+  first_class) and `incident-hold admission unavailable ... fail closed`
+  depending on how far the call gets. Both are `helsinki` being unreachable, not
+  two separate problems, and neither is a product bug. A `caco bd sync` that
+  returns cleanly is necessary but NOT sufficient — it can succeed while
+  incident-hold admission is still 503. Retry on a slow cadence, keep working,
+  and let local commits hold the work: nothing is at risk while it is committed
+  on the agent branch. Do not hammer the endpoint and do not file it.
+- **Lane-split with the other worker instead of racing on a drained board.**
+  After the duplicated `-32700` work, `md3-0` and `md4-0` agreed a split by
+  surface: router/envelope/schema vs dependency-surface/JSON-RPC-message-layer.
+  Both then landed into `src/lib.rs` within the hour with zero conflicts and
+  zero duplicated implementation. If you are one of two workers here and the
+  board is empty, propose a split by surface in a directed message before you
+  start auditing — it is cheaper than the broadcast-then-discover-collision
+  path, and much cheaper than discarding a finished implementation at rebase.
 - **Heavy context: self-improve then /self-compact, don't recreate.** Operator
   guidance (helsinki:cacophony:harry): when context is heavy, prefer
   `/self-compact` over agent recreation. Use the rich context first to capture

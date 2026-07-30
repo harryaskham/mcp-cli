@@ -62,6 +62,25 @@ let server = McpServer::new(
 For CLI commands, use `write_json_result` or `write_json_result_ref` to emit the
 same stable envelope shape that MCP `tools/call` returns as structured content.
 
+## Tool registration
+
+Tool names must be unique within a router, and a tool's input type must derive a
+JSON Schema **object**: MCP constrains `inputSchema` to an object, so a scalar,
+sequence, or enum input derives metadata strict clients reject. Declare a struct
+input. Both problems are caught at registration rather than surfacing later in a
+client.
+
+- `add_tool` / `add_typed_tool` / `add_typed_tool_with_output_schema` **panic**
+  on a duplicate name or a non-object input schema. Registration is a
+  startup-time concern, so a collision fails immediately and names the offending
+  tool.
+- `try_add_tool` returns `Err(JsonError)` with code `duplicate_tool_name` or
+  `invalid_input_schema` and leaves the router unchanged. Use it when the tool
+  set is assembled dynamically from config, a plugin set, or user input.
+
+The schema check is conservative: only a root that declares a non-object `type`
+is rejected, so a nested struct using `$defs` / `$ref` registers normally.
+
 ## MCP protocol support
 
 `McpServer::serve_stdio` (and `serve_transport`) speak MCP over stdio using

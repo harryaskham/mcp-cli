@@ -456,8 +456,55 @@ impl<Ctx> ToolRouter<Ctx> {
         Self { tools: Vec::new() }
     }
 
+    /// Register a tool, replacing nothing: tool names must be unique.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a tool with the same name is already registered, or if the
+    /// tool's input schema declares a non-object root type. Registration is a
+    /// startup-time concern, and both are programming errors that would
+    /// otherwise be silent: a duplicate name leaves the second registration
+    /// unreachable, and a non-object input schema ships metadata MCP clients
+    /// reject. Use [`ToolRouter::try_add_tool`] to handle either case instead.
     pub fn add_tool(&mut self, tool: Tool<Ctx>) {
+        if let Err(error) = self.try_add_tool(tool) {
+            panic!("{}", error.message());
+        }
+    }
+
+    /// Register a tool, returning a structured error if the name is already
+    /// taken or the tool advertises an input schema MCP cannot accept.
+    ///
+    /// Use this when the tool set is assembled dynamically (from config, a
+    /// plugin set, or user input) and a collision should be reported rather
+    /// than abort the process.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`JsonError`] with code `invalid_input_schema` when the tool's
+    /// input schema declares a non-object root type, or `duplicate_tool_name`
+    /// when a tool with the same name is already registered. The router is left
+    /// unchanged in both cases.
+    pub fn try_add_tool(&mut self, tool: Tool<Ctx>) -> Result<(), JsonError> {
+        let name = &tool.metadata().name;
+        if let Some(error) = non_object_input_schema_error(name, &tool.metadata().input_schema) {
+            return Err(error);
+        }
+
+        if self
+            .tools
+            .iter()
+            .any(|existing| &existing.metadata().name == name)
+        {
+            return Err(JsonError::new(
+                ErrorCategory::Validation,
+                "duplicate_tool_name",
+                format!("tool `{name}` is already registered"),
+            ));
+        }
+
         self.tools.push(tool);
+        Ok(())
     }
 
     pub fn add_typed_tool<Input, Output, Error, Handler>(
@@ -856,6 +903,38 @@ fn negotiate_protocol_version(requested: Option<&str>) -> &'static str {
     }
 }
 
+/// Reject an input schema whose root declares a type MCP cannot accept.
+///
+/// MCP constrains `Tool.inputSchema` to a JSON Schema object, but a derived
+/// schema follows the input type: a scalar, sequence, or enum input yields a
+/// root of `"string"`, `"array"`, and so on, which strict clients reject.
+///
+/// The check is deliberately conservative: only a root that *declares* a
+/// non-object `type` is rejected. A schema that omits `type`, or expresses the
+/// object through `$ref` or a combinator, is left alone rather than guessed at.
+fn non_object_input_schema_error(name: &str, input_schema: &Value) -> Option<JsonError> {
+    let declared = input_schema.get("type")?;
+    let describes_object = match declared {
+        Value::String(kind) => kind == "object",
+        Value::Array(kinds) => kinds.iter().any(|kind| kind == "object"),
+        _ => false,
+    };
+
+    if describes_object {
+        return None;
+    }
+
+    Some(JsonError::new(
+        ErrorCategory::Validation,
+        "invalid_input_schema",
+        format!(
+            "tool `{name}` advertises an inputSchema with root type {declared}; \
+             MCP requires inputSchema to be a JSON Schema object, so the tool's \
+             input type should be a struct"
+        ),
+    ))
+}
+
 /// Build a JSON-RPC `-32700 Parse error` response for a frame that exceeded the
 /// configured size cap.
 ///
@@ -1037,8 +1116,8 @@ mod tests {
     use super::{
         DEFAULT_MAX_FRAME_BYTES, EnvelopeMeta, ErrorCategory, JSON_SCHEMA_VERSION, JsonEnvelope,
         JsonError, McpCliError, McpServer, ProtocolFrame, SUPPORTED_PROTOCOL_VERSIONS,
-        StdioServerConfig, StructuredError, ToolRouter, read_protocol_message, write_json_result,
-        write_json_result_ref,
+        StdioServerConfig, StructuredError, Tool, ToolRouter, read_protocol_message,
+        write_json_result, write_json_result_ref,
     };
     use clap::{Args, Parser, Subcommand};
     use schemars::JsonSchema;
@@ -1269,6 +1348,129 @@ mod tests {
         assert_eq!(
             add_tool.input_schema["properties"]["rhs"]["type"],
             "integer"
+        );
+    }
+
+    #[test]
+    fn router_rejects_a_tool_whose_input_schema_is_not_an_object() {
+        // MCP constrains inputSchema to a JSON Schema object. A scalar, sequence
+        // or enum input derives a root of "string" / "array" / etc, which strict
+        // clients reject — and mcp-cli previously advertised it without comment.
+        for (name, error) in [
+            (
+                "scalar",
+                ToolRouter::<()>::new()
+                    .try_add_tool_for_test::<String>("scalar")
+                    .expect_err("a string input schema should be rejected"),
+            ),
+            (
+                "sequence",
+                ToolRouter::<()>::new()
+                    .try_add_tool_for_test::<Vec<i64>>("sequence")
+                    .expect_err("an array input schema should be rejected"),
+            ),
+            (
+                "choice",
+                ToolRouter::<()>::new()
+                    .try_add_tool_for_test::<SampleChoice>("choice")
+                    .expect_err("an enum input schema should be rejected"),
+            ),
+        ] {
+            assert_eq!(error.code(), "invalid_input_schema", "for {name}");
+            assert_eq!(error.category(), ErrorCategory::Validation, "for {name}");
+            assert!(error.message().contains(name), "for {name}");
+        }
+    }
+
+    #[test]
+    fn router_accepts_a_struct_input_schema_including_nested_refs() {
+        // A nested struct derives `$defs` + `$ref` but keeps a `type: object`
+        // root, which is conformant and must not be rejected.
+        let mut router = ToolRouter::<()>::new();
+        router
+            .try_add_tool_for_test::<SampleNested>("nested")
+            .expect("a struct input schema should register");
+
+        let metadata = router.tool_metadata();
+        assert_eq!(metadata.len(), 1);
+        assert_eq!(metadata[0].input_schema["type"], "object");
+        assert!(
+            metadata[0].input_schema["properties"]["inner"]["$ref"].is_string(),
+            "the nested property should still be a $ref"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "MCP requires inputSchema to be a JSON Schema object")]
+    fn add_typed_tool_panics_on_a_non_object_input_schema() {
+        let mut router = ToolRouter::<()>::new();
+        router.add_typed_tool("scalar", "A scalar input.", |(), _input: String| {
+            Ok::<_, SampleError>(json!({}))
+        });
+    }
+
+    #[test]
+    fn router_rejects_a_duplicate_tool_name_with_a_structured_error() {
+        // A duplicate registration would otherwise be silent: `tools/list` would
+        // advertise the name twice and `call_tool` would dispatch to the first
+        // registration forever, leaving the second unreachable.
+        let mut router = build_math_router();
+
+        let error = router
+            .try_add_tool(Tool::new_typed::<AddArgs, Value, SampleError, _>(
+                "math_add",
+                "A second, colliding registration.",
+                |(), _args: AddArgs| Ok::<_, SampleError>(json!({ "sum": 0 })),
+            ))
+            .expect_err("a duplicate tool name should be rejected");
+
+        assert_eq!(error.code(), "duplicate_tool_name");
+        assert_eq!(error.category(), ErrorCategory::Validation);
+        assert!(error.message().contains("math_add"));
+
+        // The router is unchanged: still one `math_add`, still the original.
+        let names: Vec<String> = router
+            .tool_metadata()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect();
+        assert_eq!(names.iter().filter(|name| *name == "math_add").count(), 1);
+        assert_eq!(
+            router.call_tool(&(), "math_add", json!({ "lhs": 2, "rhs": 3 })),
+            JsonEnvelope::success_for("math_add", json!({ "sum": 5 }))
+        );
+    }
+
+    #[test]
+    fn router_accepts_a_distinct_tool_name() {
+        let mut router = build_math_router();
+
+        router
+            .try_add_tool(Tool::new_typed::<AddArgs, Value, SampleError, _>(
+                "math_add_v2",
+                "A distinct registration.",
+                |(), args: AddArgs| Ok::<_, SampleError>(json!({ "sum": args.lhs + args.rhs })),
+            ))
+            .expect("a distinct tool name should register");
+
+        assert!(
+            router
+                .tool_metadata()
+                .iter()
+                .any(|tool| tool.name == "math_add_v2")
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "tool `math_add` is already registered")]
+    fn add_tool_panics_on_a_duplicate_tool_name() {
+        // The ergonomic registration path fails loudly at startup rather than
+        // building a router with an unreachable tool.
+        let mut router = build_math_router();
+        router.add_typed_tool(
+            "math_add",
+            "A colliding registration.",
+            |(), args: AddArgs| Ok::<_, SampleError>(json!({ "sum": args.lhs + args.rhs })),
         );
     }
 
@@ -2392,6 +2594,43 @@ mod tests {
         // A non-object member has no recoverable id, so it answers with null.
         assert_eq!(responses[2]["id"], Value::Null);
         assert_eq!(responses[2]["error"]["code"], -32600);
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+    struct SampleInner {
+        a: i64,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+    struct SampleNested {
+        inner: SampleInner,
+        b: String,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+    enum SampleChoice {
+        Left,
+        Right,
+    }
+
+    /// Register a no-op tool with the given `Input` type, for schema-shape tests.
+    trait TryAddToolForTest {
+        fn try_add_tool_for_test<Input>(&mut self, name: &str) -> Result<(), JsonError>
+        where
+            Input: serde::de::DeserializeOwned + JsonSchema + 'static;
+    }
+
+    impl TryAddToolForTest for ToolRouter<()> {
+        fn try_add_tool_for_test<Input>(&mut self, name: &str) -> Result<(), JsonError>
+        where
+            Input: serde::de::DeserializeOwned + JsonSchema + 'static,
+        {
+            self.try_add_tool(Tool::new_typed::<Input, Value, SampleError, _>(
+                name,
+                "A tool registered for its input schema shape.",
+                |(), _input: Input| Ok::<_, SampleError>(json!({})),
+            ))
+        }
     }
 
     fn frame_request(value: &Value) -> Vec<u8> {
