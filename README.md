@@ -87,10 +87,21 @@ newline-delimited JSON (NDJSON): one JSON-RPC message per line terminated by
 Malformed input is answered with a JSON-RPC error while the session keeps
 serving, rather than tearing the connection down:
 
-- `-32700` Parse error — a frame that is not valid JSON (`id` is `null`).
+- `-32700` Parse error — a frame that is not valid JSON, is not valid UTF-8, or
+  exceeds the frame size cap (`id` is `null`).
 - `-32600` Invalid Request — JSON that is not a valid JSON-RPC request object.
 - `-32601` Method not found — an unknown MCP method.
 - `-32602` Invalid params — a `tools/call` whose params do not deserialize.
+
+The stdio transport is newline-delimited with no length prefix, so a single
+frame is capped at `DEFAULT_MAX_FRAME_BYTES` (16 MiB) to keep a peer that never
+emits a newline from forcing an unbounded allocation. An oversized frame is
+discarded up to the next frame boundary and reported as a parse error. Override
+the cap per server:
+
+```rust,ignore
+let server = McpServer::new(config, router).with_max_frame_bytes(1024 * 1024);
+```
 
 ## Development
 

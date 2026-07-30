@@ -53,7 +53,7 @@
 //! emit the same stable envelope shape that MCP `tools/call` returns as
 //! structured content.
 
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::sync::Arc;
 
 use schemars::JsonSchema;
@@ -69,6 +69,21 @@ pub const JSON_SCHEMA_VERSION: u32 = 1;
 /// is the server's preferred (latest) version, advertised when the client's
 /// requested version is unsupported or omitted.
 pub const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2024-11-05", "2025-03-26", "2025-06-18"];
+
+/// Default cap on the size of a single newline-delimited MCP stdio frame.
+///
+/// The stdio transport has no length prefix, so a peer that never emits a
+/// newline would otherwise force the server to buffer without bound. Frames
+/// larger than this are rejected with a JSON-RPC parse error instead of being
+/// accumulated in memory. Override per server with
+/// [`McpServer::with_max_frame_bytes`].
+pub const DEFAULT_MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
+
+/// Chunk size used to drain the remainder of an oversized frame.
+///
+/// Draining in bounded chunks lets the transport resynchronise on the next
+/// frame boundary without buffering the discarded bytes.
+const OVERSIZED_DRAIN_CHUNK_BYTES: usize = 64 * 1024;
 
 /// Stable categories for structured JSON and MCP errors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -515,12 +530,39 @@ impl<Ctx> ToolRouter<Ctx> {
 pub struct McpServer<Ctx> {
     config: StdioServerConfig,
     router: ToolRouter<Ctx>,
+    max_frame_bytes: usize,
 }
 
 impl<Ctx> McpServer<Ctx> {
     #[must_use]
     pub fn new(config: StdioServerConfig, router: ToolRouter<Ctx>) -> Self {
-        Self { config, router }
+        Self {
+            config,
+            router,
+            max_frame_bytes: DEFAULT_MAX_FRAME_BYTES,
+        }
+    }
+
+    /// Override the largest single stdio frame this server will buffer.
+    ///
+    /// Defaults to [`DEFAULT_MAX_FRAME_BYTES`]. A frame larger than the cap is
+    /// answered with a JSON-RPC parse error and skipped; the session keeps
+    /// serving. A cap of `0` is raised to 1 byte so a frame boundary can still
+    /// be found.
+    #[must_use]
+    pub const fn with_max_frame_bytes(mut self, max_frame_bytes: usize) -> Self {
+        self.max_frame_bytes = if max_frame_bytes == 0 {
+            1
+        } else {
+            max_frame_bytes
+        };
+        self
+    }
+
+    /// The largest single stdio frame this server will buffer, in bytes.
+    #[must_use]
+    pub const fn max_frame_bytes(&self) -> usize {
+        self.max_frame_bytes
     }
 
     #[must_use]
@@ -565,17 +607,30 @@ impl<Ctx> McpServer<Ctx> {
         R: BufRead,
         W: Write,
     {
-        while let Some(message) = read_protocol_message(&mut reader)? {
-            // A frame that is not valid JSON at all is a JSON-RPC Parse error.
-            // Answer with `-32700` and keep serving: a single malformed line
-            // from a noisy or buggy peer must not tear down a long-lived stdio
-            // session, consistent with the `-32600` / `-32602` handling below.
-            let response = match serde_json::from_slice::<Value>(&message) {
-                Ok(value) => self.handle_request_value(ctx, value)?,
-                Err(error) => Some(parse_error_response(&error)),
-            };
-            if let Some(response) = response {
-                write_protocol_message(&mut writer, &response)?;
+        loop {
+            match read_protocol_message(&mut reader, self.max_frame_bytes)? {
+                ProtocolFrame::Eof => break,
+                // The frame exceeded the configured cap, so it was never
+                // buffered in full and cannot be parsed. Report it like any
+                // other unparseable frame and carry on with the next one.
+                ProtocolFrame::Oversized(bytes) => {
+                    let response = oversized_frame_response(bytes, self.max_frame_bytes);
+                    write_protocol_message(&mut writer, &response)?;
+                }
+                ProtocolFrame::Message(message) => {
+                    // A frame that is not valid JSON at all (including invalid
+                    // UTF-8) is a JSON-RPC Parse error. Answer with `-32700` and
+                    // keep serving: a single malformed line from a noisy or
+                    // buggy peer must not tear down a long-lived stdio session,
+                    // consistent with the `-32600` / `-32602` handling below.
+                    let response = match serde_json::from_slice::<Value>(&message) {
+                        Ok(value) => self.handle_request_value(ctx, value)?,
+                        Err(error) => Some(parse_error_response(&error)),
+                    };
+                    if let Some(response) = response {
+                        write_protocol_message(&mut writer, &response)?;
+                    }
+                }
             }
         }
 
@@ -754,6 +809,25 @@ fn negotiate_protocol_version(requested: Option<&str>) -> &'static str {
     }
 }
 
+/// Build a JSON-RPC `-32700 Parse error` response for a frame that exceeded the
+/// configured size cap.
+///
+/// The frame was never buffered in full, so no id is recoverable and the id is
+/// `null`, as for any other parse failure.
+fn oversized_frame_response(discarded_bytes: usize, max_frame_bytes: usize) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": Value::Null,
+        "error": {
+            "code": -32700,
+            "message": format!(
+                "parse error: frame exceeds the {max_frame_bytes}-byte limit \
+                 ({discarded_bytes} bytes discarded)"
+            )
+        }
+    })
+}
+
 /// Build a JSON-RPC `-32700 Parse error` response for a frame that is not
 /// valid JSON.
 ///
@@ -786,33 +860,98 @@ fn invalid_request_response(id: &Value, error: &serde_json::Error) -> Value {
     })
 }
 
+/// One framing outcome from the MCP stdio transport.
+#[derive(Debug)]
+enum ProtocolFrame {
+    /// A complete frame, with its newline terminator trimmed.
+    Message(Vec<u8>),
+    /// A frame that exceeded the size cap. The payload is discarded up to the
+    /// next frame boundary; the value is the number of bytes dropped.
+    Oversized(usize),
+    /// Clean end of stream.
+    Eof,
+}
+
 /// Read one newline-delimited JSON message from an MCP stdio transport.
 ///
 /// The MCP stdio transport frames each JSON-RPC message as a single line of
 /// UTF-8 JSON terminated by `\n` (no `Content-Length` headers, no embedded
-/// newlines). Blank lines between messages are skipped. Returns `Ok(None)` on a
-/// clean end of stream.
-fn read_protocol_message<R>(reader: &mut R) -> Result<Option<Vec<u8>>, McpCliError>
+/// newlines). Blank lines between messages are skipped.
+///
+/// The frame is read as raw bytes and never buffers more than
+/// `max_frame_bytes` for one message: the transport has no length prefix, so a
+/// peer that never emits a newline would otherwise force an unbounded
+/// allocation. Bytes are returned unvalidated — UTF-8 and JSON validity are the
+/// serve layer's concern, so a non-UTF-8 frame becomes an ordinary parse error
+/// rather than an I/O failure that ends the session.
+fn read_protocol_message<R>(
+    reader: &mut R,
+    max_frame_bytes: usize,
+) -> Result<ProtocolFrame, McpCliError>
 where
     R: BufRead,
 {
-    let mut line = String::new();
+    // One extra byte of headroom so a frame of exactly `max_frame_bytes` can
+    // still be read together with its terminator.
+    let limit = (max_frame_bytes as u64).saturating_add(1);
+    let mut frame = Vec::new();
 
     loop {
-        line.clear();
-        let bytes_read = reader.read_line(&mut line)?;
+        frame.clear();
+        let bytes_read = Read::take(&mut *reader, limit).read_until(b'\n', &mut frame)?;
         if bytes_read == 0 {
-            return Ok(None);
+            return Ok(ProtocolFrame::Eof);
         }
 
-        let trimmed = line.trim_end_matches(['\r', '\n']);
+        // A frame with no terminator is oversized only when the cap stopped the
+        // read; otherwise the stream simply ended without a trailing newline and
+        // the remainder is a complete final frame.
+        if frame.last() != Some(&b'\n') && bytes_read as u64 == limit {
+            // The cap was reached before any terminator: drop the rest of the
+            // line so the next frame boundary is still recoverable.
+            let discarded = bytes_read.saturating_add(drain_to_frame_boundary(reader)?);
+            return Ok(ProtocolFrame::Oversized(discarded));
+        }
+
+        let trimmed = trim_frame_terminator(&frame);
         if trimmed.is_empty() {
             // Tolerate blank separator lines between messages.
             continue;
         }
 
-        return Ok(Some(trimmed.as_bytes().to_vec()));
+        return Ok(ProtocolFrame::Message(trimmed.to_vec()));
     }
+}
+
+/// Discard bytes up to and including the next newline, in bounded chunks.
+///
+/// Returns the number of bytes discarded. A clean end of stream ends the drain.
+fn drain_to_frame_boundary<R>(reader: &mut R) -> Result<usize, McpCliError>
+where
+    R: BufRead,
+{
+    let mut discarded = 0usize;
+    let mut chunk = Vec::new();
+
+    loop {
+        chunk.clear();
+        let bytes_read = Read::take(&mut *reader, OVERSIZED_DRAIN_CHUNK_BYTES as u64)
+            .read_until(b'\n', &mut chunk)?;
+        if bytes_read == 0 {
+            return Ok(discarded);
+        }
+
+        discarded = discarded.saturating_add(bytes_read);
+        if chunk.last() == Some(&b'\n') {
+            return Ok(discarded);
+        }
+    }
+}
+
+/// Trim a single `\n` terminator and any preceding `\r` from a raw frame.
+fn trim_frame_terminator(frame: &[u8]) -> &[u8] {
+    let frame = frame.strip_suffix(b"\n").unwrap_or(frame);
+    frame.strip_suffix(b"\r").unwrap_or(frame)
 }
 
 /// Write one newline-delimited JSON message to an MCP stdio transport.
@@ -833,9 +972,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        EnvelopeMeta, ErrorCategory, JSON_SCHEMA_VERSION, JsonEnvelope, JsonError, McpCliError,
-        McpServer, SUPPORTED_PROTOCOL_VERSIONS, StdioServerConfig, StructuredError, ToolRouter,
-        read_protocol_message, write_json_result, write_json_result_ref,
+        DEFAULT_MAX_FRAME_BYTES, EnvelopeMeta, ErrorCategory, JSON_SCHEMA_VERSION, JsonEnvelope,
+        JsonError, McpCliError, McpServer, ProtocolFrame, SUPPORTED_PROTOCOL_VERSIONS,
+        StdioServerConfig, StructuredError, ToolRouter, read_protocol_message, write_json_result,
+        write_json_result_ref,
     };
     use clap::{Args, Parser, Subcommand};
     use schemars::JsonSchema;
@@ -1272,22 +1412,20 @@ mod tests {
     fn read_protocol_message_reads_one_newline_delimited_line() {
         let mut input = std::io::Cursor::new(b"{\"jsonrpc\":\"2.0\"}\n".to_vec());
 
-        let message = read_protocol_message(&mut input)
-            .expect("a newline-delimited line should read cleanly")
-            .expect("a message should be present");
+        let frame = read_protocol_message(&mut input, DEFAULT_MAX_FRAME_BYTES)
+            .expect("a newline-delimited line should read cleanly");
 
-        assert_eq!(message, b"{\"jsonrpc\":\"2.0\"}");
+        assert_eq!(frame_bytes(frame), b"{\"jsonrpc\":\"2.0\"}");
     }
 
     #[test]
     fn read_protocol_message_skips_blank_separator_lines() {
         let mut input = std::io::Cursor::new(b"\n\r\n{\"id\":1}\n".to_vec());
 
-        let message = read_protocol_message(&mut input)
-            .expect("blank lines should be skipped")
-            .expect("a message should follow the blank lines");
+        let frame = read_protocol_message(&mut input, DEFAULT_MAX_FRAME_BYTES)
+            .expect("blank lines should be skipped");
 
-        assert_eq!(message, b"{\"id\":1}");
+        assert_eq!(frame_bytes(frame), b"{\"id\":1}");
     }
 
     #[test]
@@ -1296,20 +1434,88 @@ mod tests {
         // layer reject non-JSON, matching the MCP stdio NDJSON transport.
         let mut input = std::io::Cursor::new(b"this is not json\n".to_vec());
 
-        let message = read_protocol_message(&mut input)
-            .expect("reading a line should not itself fail")
-            .expect("the raw line should be returned");
+        let frame = read_protocol_message(&mut input, DEFAULT_MAX_FRAME_BYTES)
+            .expect("reading a line should not itself fail");
 
-        assert_eq!(message, b"this is not json");
+        assert_eq!(frame_bytes(frame), b"this is not json");
+    }
+
+    #[test]
+    fn read_protocol_message_returns_raw_bytes_for_invalid_utf8() {
+        // Framing must not validate UTF-8: `read_line` would fail the whole
+        // session with Io(InvalidData), whereas a bad byte should degrade to an
+        // ordinary parse error at the serve layer.
+        let mut input = std::io::Cursor::new(b"{\"a\":\"\xff\xfe\"}\n".to_vec());
+
+        let frame = read_protocol_message(&mut input, DEFAULT_MAX_FRAME_BYTES)
+            .expect("invalid UTF-8 must not be an I/O error");
+
+        assert_eq!(frame_bytes(frame), b"{\"a\":\"\xff\xfe\"}");
+    }
+
+    #[test]
+    fn read_protocol_message_accepts_a_frame_exactly_at_the_cap() {
+        let payload = vec![b'x'; 8];
+        let mut input = std::io::Cursor::new([payload.clone(), b"\n".to_vec()].concat());
+
+        let frame =
+            read_protocol_message(&mut input, payload.len()).expect("a frame at the cap is legal");
+
+        assert_eq!(frame_bytes(frame), payload.as_slice());
+    }
+
+    #[test]
+    fn read_protocol_message_reports_an_oversized_frame_and_resyncs() {
+        // One byte over the cap: the frame is discarded up to the next newline
+        // and the following frame is still readable.
+        let mut input =
+            std::io::Cursor::new([b"xxxxxxxxx\n".to_vec(), b"{\"id\":1}\n".to_vec()].concat());
+
+        match read_protocol_message(&mut input, 8).expect("an oversized frame is not an error") {
+            ProtocolFrame::Oversized(discarded) => assert_eq!(discarded, 10),
+            other => panic!("expected an oversized frame, got {other:?}"),
+        }
+
+        let frame = read_protocol_message(&mut input, 8).expect("the transport should resync");
+        assert_eq!(frame_bytes(frame), b"{\"id\":1}");
+    }
+
+    #[test]
+    fn read_protocol_message_bounds_a_frame_that_never_terminates() {
+        // A peer that never emits a newline must not be able to force an
+        // unbounded allocation: the read stops at the cap.
+        let mut input = std::io::Cursor::new(vec![b'x'; 1024]);
+
+        match read_protocol_message(&mut input, 16).expect("an unterminated frame is not an error")
+        {
+            ProtocolFrame::Oversized(discarded) => assert_eq!(discarded, 1024),
+            other => panic!("expected an oversized frame, got {other:?}"),
+        }
+
+        assert!(matches!(
+            read_protocol_message(&mut input, 16).expect("clean EOF should follow"),
+            ProtocolFrame::Eof
+        ));
+    }
+
+    #[test]
+    fn read_protocol_message_returns_a_final_frame_without_a_trailing_newline() {
+        let mut input = std::io::Cursor::new(b"{\"id\":1}".to_vec());
+
+        let frame = read_protocol_message(&mut input, DEFAULT_MAX_FRAME_BYTES)
+            .expect("a missing trailing newline is tolerated at EOF");
+
+        assert_eq!(frame_bytes(frame), b"{\"id\":1}");
     }
 
     #[test]
     fn read_protocol_message_returns_none_on_clean_eof() {
         let mut input = std::io::Cursor::new(Vec::new());
 
-        let message = read_protocol_message(&mut input).expect("clean EOF should not be an error");
+        let frame = read_protocol_message(&mut input, DEFAULT_MAX_FRAME_BYTES)
+            .expect("clean EOF should not be an error");
 
-        assert!(message.is_none());
+        assert!(matches!(frame, ProtocolFrame::Eof));
     }
 
     #[test]
@@ -1426,6 +1632,80 @@ mod tests {
         assert_eq!(responses[0]["id"], Value::Null);
         // The session keeps serving: the request after the garbage line is answered.
         assert_eq!(responses[1]["id"], 7);
+        assert_eq!(responses[1]["result"], json!({}));
+    }
+
+    #[test]
+    fn stdio_server_answers_an_oversized_frame_with_parse_error_and_keeps_serving() {
+        // A frame beyond the cap is never buffered in full; the server reports it
+        // and resynchronises on the next frame instead of allocating without
+        // bound or dropping the session.
+        let server = McpServer::new(
+            StdioServerConfig {
+                server_name: "sample-mcp".to_string(),
+                server_version: "0.0.1".to_string(),
+            },
+            build_math_router(),
+        )
+        .with_max_frame_bytes(64);
+        assert_eq!(server.max_frame_bytes(), 64);
+
+        let mut input = vec![b'x'; 4096];
+        input.push(b'\n');
+        input.extend_from_slice(&frame_request(&json!({
+            "jsonrpc": "2.0",
+            "id": 9,
+            "method": "ping"
+        })));
+
+        let mut output = Vec::new();
+        server
+            .serve_transport(&(), std::io::Cursor::new(input), &mut output)
+            .expect("an oversized frame must not end the session");
+
+        let responses = parse_framed_responses(&output);
+        assert_eq!(responses.len(), 2);
+        assert_eq!(responses[0]["error"]["code"], -32700);
+        assert_eq!(responses[0]["id"], Value::Null);
+        assert!(
+            responses[0]["error"]["message"]
+                .as_str()
+                .expect("error message should be a string")
+                .contains("64-byte limit")
+        );
+        assert_eq!(responses[1]["id"], 9);
+        assert_eq!(responses[1]["result"], json!({}));
+    }
+
+    #[test]
+    fn stdio_server_answers_invalid_utf8_with_parse_error_and_keeps_serving() {
+        // Framing reads raw bytes, so a non-UTF-8 frame degrades to a -32700
+        // parse error rather than an Io(InvalidData) that ends the session.
+        let server = McpServer::new(
+            StdioServerConfig {
+                server_name: "sample-mcp".to_string(),
+                server_version: "0.0.1".to_string(),
+            },
+            build_math_router(),
+        );
+
+        let mut input = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"\xff\xfe\"}\n".to_vec();
+        input.extend_from_slice(&frame_request(&json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "ping"
+        })));
+
+        let mut output = Vec::new();
+        server
+            .serve_transport(&(), std::io::Cursor::new(input), &mut output)
+            .expect("a non-UTF-8 frame must not end the session");
+
+        let responses = parse_framed_responses(&output);
+        assert_eq!(responses.len(), 2);
+        assert_eq!(responses[0]["error"]["code"], -32700);
+        assert_eq!(responses[0]["id"], Value::Null);
+        assert_eq!(responses[1]["id"], 2);
         assert_eq!(responses[1]["result"], json!({}));
     }
 
@@ -1893,6 +2173,13 @@ mod tests {
         let mut message = serde_json::to_vec(value).expect("request should serialize");
         message.push(b'\n');
         message
+    }
+
+    fn frame_bytes(frame: ProtocolFrame) -> Vec<u8> {
+        match frame {
+            ProtocolFrame::Message(message) => message,
+            other => panic!("expected a complete frame, got {other:?}"),
+        }
     }
 
     fn parse_framed_responses(bytes: &[u8]) -> Vec<Value> {
