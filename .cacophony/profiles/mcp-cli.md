@@ -149,6 +149,47 @@ worker. Additive; extend over time rather than pruning.
   board is empty, propose a split by surface in a directed message before you
   start auditing — it is cheaper than the broadcast-then-discover-collision
   path, and much cheaper than discarding a finished implementation at rebase.
+- **A bead gated on a required check is NOT closeable until that check is
+  green, whoever landed it.** Confirming the sha reached `main` confirms the
+  land, not the gate. Observed 2026-07-31: bd-a9b422 landed at `970206a`,
+  `git ls-remote` confirmed the sha on true GitHub, and the bead was closed —
+  while the required CI check was FAILING on that exact commit. The next worker
+  rebased onto the red tip, re-ran tests but not clippy, and landed bd-cc4429 on
+  top; two failing runs and a cross-worker handoff (bd-46f7d2) followed. After
+  reintegration run `gh run list --repo harryaskham/mcp-cli --limit 1` and
+  confirm `success` for YOUR commit before `caco bd close`. If `gh` is
+  rate-limited (HTTP 403), wait and re-check — do not close blind. Letting
+  hosted CI own validation is only sound if you actually read the verdict.
+- **Rebasing invalidates the earlier clippy run exactly as much as the earlier
+  test run.** Re-running only `cargo test` after a rebase is how the second
+  worker shipped over an already-broken lint.
+- **Under `local_merge` / direct landing the CI gate is POST-HOC.** Branch
+  protection requires the `check` context on pull requests, but a direct land
+  never opens a PR, so nothing blocks a red commit from reaching `main` — CI only
+  reports after the fact. Escalated as `choice-019fb686` and RESOLVED
+  2026-07-31 by operator-proxy: unblock the PR backend, because it is the only
+  option that is actually a gate and the pre-merge machinery is already built
+  (CI runs on `pull_request`, branch protection already requires the check).
+  Note bd-1d514b is CLOSED — the direct-intent-over-PR-backend machinery exists;
+  the only missing piece is the `projects[].integration` entry, which is
+  operator-routed and not a worker's to make. Do not wait on it to keep working;
+  if it has not landed within a few hours, say so rather than quietly absorbing
+  the risk.
+- **MANDATORY INTERIM until that config is live (operator-proxy, not
+  optional):** run `cargo clippy --workspace --all-targets --all-features --
+  -D warnings` IMMEDIATELY before reintegrating, and read the CI verdict after
+  landing before closing the bead. This knowingly re-adds part of the local
+  preflight the hosted-CI lane asks us to skip; that is the correct trade while
+  the gate is absent, and it stops the moment the gate exists.
+- **`clippy::pedantic` is on, so `too_many_lines` (100) bites long match-based
+  dispatch.** `handle_request` crossed it at 104 lines by gaining one small arm.
+  Extract an arm into its own method rather than reaching for an `allow`.
+- **A green suite is not evidence for an invariant that has no test.** When
+  refactoring, enumerate the behavioural invariants FIRST and check that each one
+  actually has coverage on the path being moved. Doing this on bd-46f7d2 found
+  that `tools/call` sent as a NOTIFICATION (no id, runs the tool, returns no
+  response) had no test at all — the exact arm being extracted, so a green run
+  was not evidence for the thing it most needed to prove.
 - **Heavy context: self-improve then /self-compact, don't recreate.** Operator
   guidance (helsinki:cacophony:harry): when context is heavy, prefer
   `/self-compact` over agent recreation. Use the rich context first to capture
