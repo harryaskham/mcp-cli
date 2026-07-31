@@ -1,8 +1,10 @@
 # mcp-cli profile
 
-Use this profile for work on the standalone `mcp-cli` crate, the generic Rust
-framework for projecting CLI command implementations into structured JSON and MCP
-stdio tools.
+Use this profile for work on the standalone `mcp-cli-core` crate, the generic
+Rust framework for projecting CLI command implementations into structured JSON
+and MCP stdio tools. The repository is still `harryaskham/mcp-cli` and the
+library is still imported as `mcp_cli`; only the PACKAGE name is `mcp-cli-core`,
+because `mcp-cli` on crates.io belongs to an unrelated project (bd-26b8a3).
 
 ## Scope and design rules
 
@@ -196,6 +198,22 @@ worker. Additive; extend over time rather than pruning.
 - **Rebasing invalidates the earlier clippy run exactly as much as the earlier
   test run.** Re-running only `cargo test` after a rebase is how the second
   worker shipped over an already-broken lint.
+- **A squash-landing workflow makes YOUR LOCAL SHAS systematically wrong for any
+  artefact that outlives the branch.** Reintegration squashes the agent branch,
+  so the commits you made are never the commit that landed. Anything citing a
+  sha and surviving the branch — a changelog, a bead reference, a
+  commit-message cross-reference, a profile note like this one — is wrong if
+  written from memory of what you committed. Observed 2026-07-31: a first
+  changelog draft cited two agent-branch shas that had never existed on `main`,
+  and it would have looked authoritative while pointing at nothing. The cheap
+  habits that avoid it:
+  - cite the `landed_commit` from the reintegration receipt, never your local
+    `HEAD`;
+  - verify programmatically rather than by eye, e.g.
+    `git merge-base --is-ancestor <sha> origin/main` for every sha in the file,
+    and `git log origin/main --grep=<bead-id>` for every bead id.
+  Same family as closing a bead on a landed sha without reading the check: a
+  cheap local fact standing in for the load-bearing remote one.
 - **Under `local_merge` / direct landing the CI gate is POST-HOC.** Branch
   protection requires the `check` context on pull requests, but a direct land
   never opens a PR, so nothing blocks a red commit from reaching `main` — CI only

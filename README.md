@@ -1,10 +1,27 @@
-# mcp-cli
+# mcp-cli-core
 
-`mcp-cli` is a small Rust framework for exposing the same command implementation
+`mcp-cli-core` is a small Rust framework for exposing the same command implementation
 through a traditional CLI JSON surface and a Model Context Protocol (MCP) stdio
 server. It is intentionally application-agnostic: consumers provide typed input
 structures, output values, and structured errors; the crate handles envelopes,
 JSON schema generation, MCP framing, tool listing, and tool calls.
+
+## Package name vs import path
+
+The package is **`mcp-cli-core`**; the library it builds is still **`mcp_cli`**,
+so source code keeps using `use mcp_cli::...` unchanged. The package name
+differs because `mcp-cli` on crates.io belongs to an unrelated project. A
+git/path consumer either renames the dependency key:
+
+```toml
+mcp-cli-core = { git = "https://github.com/harryaskham/mcp-cli" }
+```
+
+or keeps the old key and points it at the renamed package:
+
+```toml
+mcp-cli = { git = "https://github.com/harryaskham/mcp-cli", package = "mcp-cli-core" }
+```
 
 ## What it provides
 
@@ -195,4 +212,4 @@ cargo test --workspace --all-features
 
 Keep this crate generic. Application-specific concepts (for example window IDs,
 platform adapters, or project-specific error codes) belong in the consuming CLI,
-not in `mcp-cli`.
+not in `mcp-cli-core`.

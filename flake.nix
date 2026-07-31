@@ -1,5 +1,5 @@
 {
-  description = "mcp-cli — reusable JSON envelope and MCP stdio helpers for CLI projects";
+  description = "mcp-cli-core — reusable JSON envelope and MCP stdio helpers for CLI projects";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 

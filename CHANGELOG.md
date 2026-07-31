@@ -1,11 +1,12 @@
 # Changelog
 
-Notable changes to `mcp-cli`, in the spirit of
+Notable changes to `mcp-cli-core`, in the spirit of
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 **Entries are keyed by commit, not by released version.** This crate is consumed
 by git rev or path/submodule rather than from a registry — the `mcp-cli` name on
-crates.io belongs to an unrelated project — so `version` in `Cargo.toml` is not
+crates.io belongs to an unrelated project, which is why the package was renamed
+to `mcp-cli-core` — so `version` in `Cargo.toml` is not
 something a consumer can pin to. A commit sha is. Each entry therefore carries
 the landing sha and the bead that motivated it, which is also what you want when
 bisecting.

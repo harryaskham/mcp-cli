@@ -1,5 +1,5 @@
 [package]
-name = "mcp-cli"
+name = "mcp-cli-core"
 description = "Reusable JSON envelope and MCP stdio helpers for CLI projects"
 version = "0.0.1"
 edition = "2024"
@@ -13,6 +13,12 @@ keywords = ["cli", "json", "mcp"]
 categories = ["command-line-utilities", "development-tools"]
 
 [lib]
+# The PACKAGE is `mcp-cli-core` because `mcp-cli` on crates.io belongs to an
+# unrelated project (bd-26b8a3). The LIBRARY keeps the original `mcp_cli` name
+# so existing consumers' `use mcp_cli::...` continues to compile unchanged; a
+# git/path consumer only has to rename the dependency key, or keep it and add
+# `package = "mcp-cli-core"`.
+name = "mcp_cli"
 path = "src/lib.rs"
 
 [dependencies]
