@@ -225,14 +225,19 @@ worker. Additive; extend over time rather than pruning.
      one, so expand first with `git rev-parse <short-sha>` and do not misdiagnose
      a five-second problem as an unreadable gate. `gh api rate_limit` tells you
      which buckets are live and is BOOTSTRAP-SAFE — it stays readable while core
-     is 0/5000, which is how the exhaustion gets diagnosed at all — but it is NOT
-     free here despite GitHub documenting `/rate_limit` as exempt. Measured
-     2026-07-31: it increments core `used` on every invocation, by 1 per call for
-     md4-0 and by 3 per call for md3-0, so the cost is real and
-     environment-dependent (a wrapper around `gh` plausibly issues extra
-     requests). Read it ONCE per decision point and NEVER poll it: a budget probe
-     that spends budget is the worst possible thing to put in a retry loop, and a
-     retry loop is exactly where a stalled worker reaches for it.
+     is 0/5000, which is how the exhaustion gets diagnosed at all. Its per-call
+     cost is NOT reliably measurable from a worker and should not be quoted:
+     `used` is a whole-account counter that the rest of the fleet is
+     concurrently incrementing (measured 2026-07-31: roughly 1400-1600 requests
+     in ten minutes from other actors on this account), so consecutive readings
+     tell you about fleet traffic, not about your own calls. Both workers
+     initially misread it as a per-call price; a later six-reading run here gave
+     deltas of 0, +1, -1, 0, 0 — non-monotonic, so the counter is not even a
+     clean measure from this vantage. Read it ONCE per decision point and NEVER
+     poll it. The reason is not a measured price: it is that the number is
+     shared, fast-moving, and already stale when you read it, so a probe in a
+     retry loop buys nothing — and a retry loop is exactly where a stalled worker
+     reaches for it.
   Only if BOTH buckets are dark:
   1. Keep the bead open and claimed. An open bead costs a wait; a wrongly closed
      one silently deletes the work from the queue (see the BLOCKED != CLOSED
@@ -267,11 +272,15 @@ worker. Additive; extend over time rather than pruning.
   found by accident an hour after the rule that assumed the first was written.
   Generalised: nobody has enumerated which other budgets these controls silently
   depend on, so a worker cannot know in advance whether a control it is required
-  to apply is currently applicable. Until the daemon surfaces that (remaining
-  budget in the reintegration receipt being the obvious place), read
-  `gh api rate_limit` ONCE at a decision point rather than inferring capability
-  from whichever call happens to fail — and never in a loop, per the measured
-  cost above.
+  to apply is currently applicable. Worse, CHECK-FIRST TELLS YOU ABOUT THE PAST:
+  with the fleet spending 1400-1600 requests per ten minutes on the shared
+  account, a healthy budget read minutes — or seconds — ago says nothing about
+  the call you are about to make. A worker cannot fix that by measuring more
+  carefully, because the quantity is not local to it. Until the daemon surfaces
+  capability as a fact (remaining budget in the reintegration receipt being the
+  obvious place, ideally with run conclusions cached by sha so N workers cost one
+  call), read `gh api rate_limit` ONCE at a decision point rather than inferring
+  capability from whichever call happens to fail — and never in a loop.
 - **`clippy::pedantic` is on, so `too_many_lines` (100) bites long match-based
   dispatch.** `handle_request` crossed it at 104 lines by gaining one small arm.
   Extract an arm into its own method rather than reaching for an `allow`.
