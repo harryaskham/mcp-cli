@@ -421,10 +421,7 @@ impl<Ctx> Tool<Ctx> {
         // advertised outputSchema must describe that envelope (status/meta/data),
         // not the bare `Output` — otherwise a client validating structuredContent
         // against outputSchema would reject conformant responses (bd-870183).
-        tool.metadata.output_schema = Some(
-            serde_json::to_value(schemars::schema_for!(JsonEnvelope<Output>))
-                .expect("tool output schema should serialize"),
-        );
+        tool.metadata.output_schema = Some(envelope_output_schema::<Output>());
         tool
     }
 
@@ -912,6 +909,30 @@ fn negotiate_protocol_version(requested: Option<&str>) -> &'static str {
             .unwrap_or(latest),
         None => latest,
     }
+}
+
+/// Derive the advertised `outputSchema` for a tool returning `Output`.
+///
+/// `structuredContent` is always the [`JsonEnvelope`] wrapping `Output`, so the
+/// schema describes that envelope. Because the envelope is an internally-tagged
+/// enum, the derived document is rooted in `oneOf` with no declared `type`,
+/// which MCP 2025-06-18 does not accept: `outputSchema` must declare a root
+/// `"type": "object"`. Both branches of the `oneOf` are objects, so declaring it
+/// at the root rejects nothing that was previously valid while making the
+/// document conformant, and the success/error discrimination is preserved.
+fn envelope_output_schema<Output>() -> Value
+where
+    Output: JsonSchema,
+{
+    let mut schema = serde_json::to_value(schemars::schema_for!(JsonEnvelope<Output>))
+        .expect("tool output schema should serialize");
+
+    if let Some(root) = schema.as_object_mut() {
+        root.entry("type")
+            .or_insert_with(|| Value::String("object".to_owned()));
+    }
+
+    schema
 }
 
 /// Reject an input schema whose root declares a type MCP cannot accept.
@@ -2371,6 +2392,49 @@ mod tests {
         assert!(echo_tool.output_schema.is_none());
         let echo_json = serde_json::to_value(echo_tool).expect("tool metadata serializes");
         assert!(echo_json.get("outputSchema").is_none());
+    }
+
+    #[test]
+    fn advertised_output_schema_declares_an_object_root_and_keeps_the_oneof() {
+        // MCP 2025-06-18 requires outputSchema to declare a root `type: object`,
+        // but JsonEnvelope is an internally-tagged enum, so the derived document
+        // is rooted in `oneOf` with no `type` at all. Declaring the root type
+        // makes the document conformant without collapsing the success/error
+        // discrimination that makes it worth advertising.
+        let mut router: ToolRouter<()> = ToolRouter::new();
+        router.add_typed_tool_with_output_schema(
+            "sum",
+            "Add two integers and report the sum.",
+            |(), args: AddArgs| {
+                Ok::<_, SampleError>(SumOutput {
+                    sum: args.lhs + args.rhs,
+                })
+            },
+        );
+
+        let tools = router.tool_metadata();
+        let output_schema = tools[0]
+            .output_schema
+            .as_ref()
+            .expect("sum tool advertises an output schema");
+
+        assert_eq!(output_schema["type"], "object");
+
+        // Both envelope variants survive, and both are objects, so the declared
+        // root type rejects nothing the schema previously accepted.
+        let variants = output_schema["oneOf"]
+            .as_array()
+            .expect("the envelope schema keeps its oneOf branches");
+        assert_eq!(variants.len(), 2);
+        for variant in variants {
+            assert_eq!(variant["type"], "object");
+        }
+        let discriminators: Vec<&Value> = variants
+            .iter()
+            .map(|variant| &variant["properties"]["status"]["const"])
+            .collect();
+        assert!(discriminators.contains(&&json!("success")));
+        assert!(discriminators.contains(&&json!("error")));
     }
 
     #[test]

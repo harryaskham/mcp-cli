@@ -100,7 +100,10 @@ newline-delimited JSON (NDJSON): one JSON-RPC message per line terminated by
   `add_typed_tool_with_output_schema`). Because `tools/call` returns the stable
   `JsonEnvelope` as `structuredContent`, the advertised `outputSchema` describes
   that envelope (`status`/`meta`/`data`) wrapping the tool's `Output`, so the
-  returned `structuredContent` conforms to it (MCP 2025-06-18).
+  returned `structuredContent` conforms to it (MCP 2025-06-18). The envelope is
+  an internally-tagged enum, so the derived document keeps a `oneOf` over the
+  success and error variants and declares a root `"type": "object"`, which that
+  revision requires of `outputSchema`.
 - `tools/call` — runs a typed tool and returns both `structuredContent` (the
   stable `JsonEnvelope`) and a `text` content block, with `isError` reflecting
   tool failures.
