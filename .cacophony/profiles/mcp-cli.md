@@ -76,10 +76,24 @@ worker. Additive; extend over time rather than pruning.
 - **`summary/pending` is cleaned by each direct reintegration.** Recreate it with
   `mkdir -p .cacophony/agent/$CACO_AGENT_ID/summary/pending` before writing the
   next session summary.
-- **Worker scope is bound to mcp-cli.** This agent cannot read/write the
-  `cacophony` project (e.g. `bd search --project cacophony` errors with
-  "worker scope cannot access project 'cacophony'"); route cross-project asks to a
-  controller/operator instead.
+- **Worker scope is bound to mcp-cli, and cross-project bead CREATE is a
+  ONE-WAY DOOR.** `caco bd list|search --project cacophony` errors with "worker
+  scope cannot access project 'cacophony'", but the agent token DOES grant
+  cacophony `create`/`update`. That asymmetry bites (observed 2026-07-31,
+  md4-0's bd-22bd0d plus the compounding half):
+  - a create during a beads outage returns only an outbox id, never a bead id;
+  - without read scope you can then neither confirm it landed nor discover its
+    id, so `update` is granted but unusable — you can file a bead you are
+    permanently unable to revisit;
+  - worse, the failure MASQUERADES AS NONEXISTENCE: `caco bd show --bead-id
+    <a-real-cacophony-bead>` answers `bead not found`, not a scope error, which
+    is indistinguishable from "the outbox dropped it" and invites the wrong
+    inference that nothing was created.
+  So: do not blind-overwrite a cross-project bead from a local copy of the text
+  to add a paragraph — without read access you cannot tell whether someone has
+  triaged it since, and clobbering a triage note is the worse trade. Put durable
+  cross-project reasoning in THIS profile, which is readable and versioned, and
+  route the cross-project ask to a controller/operator.
 - **Do not pipe `cargo fmt --all -- --check` through `tail`/`head`.** A pipeline's
   exit status is the last command's, so `cargo fmt --check | tail` reports success
   even when rustfmt found a diff (exit 1). Run the check unpiped and inspect `$?`,
@@ -181,14 +195,38 @@ worker. Additive; extend over time rather than pruning.
   landing before closing the bead. This knowingly re-adds part of the local
   preflight the hosted-CI lane asks us to skip; that is the correct trade while
   the gate is absent, and it stops the moment the gate exists.
-- **When the CI verdict is UNREADABLE, the sanctioned state is "hold open", not
-  "close on local evidence".** `gh` returns HTTP 403 rate-limit against a token
+- **When the CI verdict looks UNREADABLE, try the other quota bucket before
+  concluding anything — and if it really is dark, HOLD OPEN rather than close on
+  local evidence.** `gh` returns HTTP 403 rate-limit against a token
   shared by the whole fleet, and it goes dark exactly when a worker most needs
   it: change finished, landed, locally verified, bead you are forbidden to
   close. The tempting resolution in that moment is to close anyway — which is
   precisely the behaviour the close-precondition exists to prevent — so
   exhaustion does not merely delay the discipline, it pressures workers off it.
   Do this instead:
+  0. **First, try the GraphQL bucket — it is separate from REST core.** Observed
+     2026-07-31: `gh run list` was hard 403 at `core 0/5000` while
+     `graphql 4442/5000` was untouched. `gh api graphql` is still `gh`, so this
+     is a first-party path and not a hand-rolled raw-API workaround. Batch
+     several shas into one call with aliases:
+     ```
+     gh api graphql -f query='
+     {
+       repository(owner: "harryaskham", name: "mcp-cli") {
+         a: object(oid: "<sha1>") { ... on Commit { statusCheckRollup { state } } }
+         b: object(oid: "<sha2>") { ... on Commit { statusCheckRollup { state } } }
+       }
+     }'
+     ```
+     `state` is `SUCCESS` / `FAILURE` / `PENDING`; that IS the verdict, so a
+     `SUCCESS` here licenses the close. Pass FULL 40-character oids: a short sha
+     fails with `argumentLiteralsIncompatible` / "Expected type 'GitObjectID'",
+     which reads like a permissions or syntax fault rather than a truncation
+     one, so expand first with `git rev-parse <short-sha>` and do not misdiagnose
+     a five-second problem as an unreadable gate. `gh api rate_limit` is itself
+     exempt from rate limiting, so use it to see which buckets are live before
+     concluding anything is unreadable.
+  Only if BOTH buckets are dark:
   1. Keep the bead open and claimed. An open bead costs a wait; a wrongly closed
      one silently deletes the work from the queue (see the BLOCKED != CLOSED
      section above). The costs are not symmetric, so hold.
@@ -202,7 +240,8 @@ worker. Additive; extend over time rather than pruning.
      typically under an hour) and close on the real verdict.
   4. If the limit persists long enough to strand finished work, escalate with
      the recorded evidence rather than choosing between closing blind and
-     holding indefinitely. Do not hand-roll a raw API call to dodge `gh`.
+     holding indefinitely. Do not hand-roll a raw API call to dodge `gh` — note
+     that `gh api graphql` above is NOT that, it is a sanctioned `gh` path.
   Also avoid stacking further lands behind an unreadable gate: each one adds
   another bead you cannot close and spends more of the same budget.
 - **Verification spends the budget it depends on.** Every land costs a compare
@@ -212,7 +251,19 @@ worker. Additive; extend over time rather than pruning.
   linearly. That makes it a daemon-side problem rather than a per-project one:
   surfacing remaining budget in the reintegration receipt, and caching run
   conclusions by sha so N workers verifying one landed sha cost one call, both
-  fix it at the right layer. Raised in the `cacophony` project by md4-0.
+  fix it at the right layer. Raised in the `cacophony` project by md4-0. The
+  aliased-GraphQL form above also gives that cache a cheap implementation: one
+  request can answer N shas at once.
+- **Verification capability should be a fact a worker can READ, not something it
+  probes for.** The close-precondition's enforceability turned out to depend on
+  which of two quota buckets happened to be alive, and the second bucket was
+  found by accident an hour after the rule that assumed the first was written.
+  Generalised: nobody has enumerated which other budgets these controls silently
+  depend on, so a worker cannot know in advance whether a control it is required
+  to apply is currently applicable. Until the daemon surfaces that (remaining
+  budget in the reintegration receipt being the obvious place), check
+  `gh api rate_limit` FIRST rather than inferring capability from whichever call
+  happens to fail.
 - **`clippy::pedantic` is on, so `too_many_lines` (100) bites long match-based
   dispatch.** `handle_request` crossed it at 104 lines by gaining one small arm.
   Extract an arm into its own method rather than reaching for an `allow`.
