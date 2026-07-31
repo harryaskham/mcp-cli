@@ -316,6 +316,15 @@ worker. Additive; extend over time rather than pruning.
      the recorded evidence rather than choosing between closing blind and
      holding indefinitely. Do not hand-roll a raw API call to dodge `gh` — note
      that `gh api graphql` above is NOT that, it is a sanctioned `gh` path.
+- **A malformed `caco bd close` receipt is not evidence either way, and a single
+  `caco bd show` is not authoritative.** Observed 2026-07-31: `close` returned
+  `closed: ? — ?`, an immediate `bd show` reported the bead still
+  `in_progress`, and a later `bd show` transport-failed outright with an
+  endpoint nonresponse. The bead was in fact closed the first time. Confirm from
+  a DIFFERENT endpoint — `caco bd list --status closed` and grep for the id —
+  rather than trusting either signal; re-running `close` is also decisive, since
+  it answers `bead ... is already closed`. Do not conclude a leak (or a success)
+  from one flaky read.
   Also avoid stacking further lands behind an unreadable gate: each one adds
   another bead you cannot close and spends more of the same budget.
 - **Verification spends the budget it depends on.** Every land costs a compare
