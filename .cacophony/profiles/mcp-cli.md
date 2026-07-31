@@ -219,25 +219,34 @@ worker. Additive; extend over time rather than pruning.
      }'
      ```
      `state` is `SUCCESS` / `FAILURE` / `PENDING`; that IS the verdict, so a
-     `SUCCESS` here licenses the close. Pass FULL 40-character oids: a short sha
+     `SUCCESS` here licenses the close. GraphQL cost is measured, not inferred,
+     on a bucket the fleet leaves untouched: one query aliasing FOUR shas costs
+     exactly 1, so verification is priced per-QUERY not per-sha, and a query that
+     fails validation costs 0 — so retry a rejected query freely, it is only your
+     time at stake. Reproduced independently on both nodes (md3-0: graphql `used`
+     42, 42 idle, 43 after one four-alias query, 43 after an invalid one).
+     Pass FULL 40-character oids: a short sha
      fails with `argumentLiteralsIncompatible` / "Expected type 'GitObjectID'",
      which reads like a permissions or syntax fault rather than a truncation
      one, so expand first with `git rev-parse <short-sha>` and do not misdiagnose
      a five-second problem as an unreadable gate. `gh api rate_limit` tells you
      which buckets are live and is BOOTSTRAP-SAFE — it stays readable while core
-     is 0/5000, which is how the exhaustion gets diagnosed at all. Its per-call
-     cost is NOT reliably measurable from a worker and should not be quoted:
-     `used` is a whole-account counter that the rest of the fleet is
-     concurrently incrementing (measured 2026-07-31: roughly 1400-1600 requests
-     in ten minutes from other actors on this account), so consecutive readings
-     tell you about fleet traffic, not about your own calls. Both workers
-     initially misread it as a per-call price; a later six-reading run here gave
-     deltas of 0, +1, -1, 0, 0 — non-monotonic, so the counter is not even a
-     clean measure from this vantage. Read it ONCE per decision point and NEVER
-     poll it. The reason is not a measured price: it is that the number is
-     shared, fast-moving, and already stale when you read it, so a probe in a
-     retry loop buys nothing — and a retry loop is exactly where a stalled worker
-     reaches for it.
+     is 0/5000, which is how the exhaustion gets diagnosed at all. But do NOT
+     check it before acting. ACT, and treat 403 as a first-class outcome; only
+     then read `rate_limit` ONCE, diagnostically, to learn WHICH bucket died, and
+     switch bucket or hold. A predictive check is worthless here: `used` is a
+     whole-account counter the fleet drives at roughly 9 requests per SECOND from
+     actors that are not you (measured 2026-07-31 by md4-0 at one-second
+     intervals; ~1400-1600 per ten minutes seen independently here), so a reading
+     of 4818 remaining is wrong seconds later and you cannot forecast it even one
+     second out. Never poll it. That inverted sequence — act, hit the 403,
+     diagnose the bucket, move to GraphQL — is exactly what actually worked; the
+     exhaustion was never predicted by anyone.
+     Its per-call cost is NOT measurable from a worker and should not be quoted:
+     both workers initially misread fleet traffic as a per-call price and got 1,
+     3, 2-3 and ~0 for the same command, including a six-reading run here with
+     deltas 0, +1, -1, 0, 0 — a negative delta is the proof that consecutive
+     readings sample the fleet, not you.
   Only if BOTH buckets are dark:
   1. Keep the bead open and claimed. An open bead costs a wait; a wrongly closed
      one silently deletes the work from the queue (see the BLOCKED != CLOSED
@@ -278,9 +287,20 @@ worker. Additive; extend over time rather than pruning.
   the call you are about to make. A worker cannot fix that by measuring more
   carefully, because the quantity is not local to it. Until the daemon surfaces
   capability as a fact (remaining budget in the reintegration receipt being the
-  obvious place, ideally with run conclusions cached by sha so N workers cost one
-  call), read `gh api rate_limit` ONCE at a decision point rather than inferring
-  capability from whichever call happens to fail — and never in a loop.
+  obvious place, ideally with run conclusions cached by sha), read
+  `gh api rate_limit` only AFTER a call fails, to diagnose which bucket died.
+  The per-query pricing above removes the last objection to the cached form: one
+  aliased query answers N shas for one request, so a daemon-side cache serving
+  the whole fleet costs one request per interval REGARDLESS of how many shas or
+  workers — it does not scale with fleet size at all.
+- **Method: to measure a counter the fleet is moving, move to a bucket the fleet
+  is not using, and start from a window boundary.** Core was climbing ~9/sec
+  while GraphQL `used` sat dead flat, so the GraphQL bucket was the uncontended
+  instrument hiding in the same token; taking the baseline just after its window
+  reset gave a true zero to measure from. That is how the per-query and
+  zero-cost-on-invalid facts above were established after four contaminated
+  attempts on the contended counter. Generalises well past rate limits: find a
+  quiet subsystem to benchmark in rather than trying to subtract the noise.
 - **`clippy::pedantic` is on, so `too_many_lines` (100) bites long match-based
   dispatch.** `handle_request` crossed it at 104 lines by gaining one small arm.
   Extract an arm into its own method rather than reaching for an `allow`.
