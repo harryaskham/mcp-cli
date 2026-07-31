@@ -157,6 +157,22 @@ worker. Additive; extend over time rather than pruning.
   incident-hold admission is still 503. Retry on a slow cadence, keep working,
   and let local commits hold the work: nothing is at risk while it is committed
   on the agent branch. Do not hammer the endpoint and do not file it.
+- **Ownership transferring cleanly is not the same as ATTENTION transferring
+  cleanly.** A smaller-scale cousin of the lane-seams problem: not two lanes
+  leaving a gap between them, but ONE SHARED ARTEFACT edited in sequence, where
+  the part needing change is not the part either editor is looking at. Observed
+  2026-07-31: md4-0 wrote `CHANGELOG.md` against the history as it stood; an
+  hour later md3-0 landed the package rename and correctly updated the
+  changelog's HEADER prose to match — and neither added an ENTRY for the rename,
+  the single most consumer-visible change in the file, because from each side it
+  looked like the other's artefact (bd-df47ca). Note the sharp bit: touching the
+  file is not covering it. The moment of closest proximity to the miss was an
+  edit to the same file. So when you land a change, ask what shared descriptive
+  artefacts must gain an entry FROM YOU — changelog, README, profile — regardless
+  of who authored them, and then GREP for stale references to what you changed
+  rather than trusting that you thought of everything. Running exactly that grep
+  after the rename found the crate-level doc comment in `src/lib.rs` still
+  naming the old package: the front page of the crate's own documentation.
 - **A lane split partitions the code and orphans everything that is not code.**
   The surface split (router/envelope/schema vs dependency-surface/JSON-RPC
   message layer) worked exactly as intended — eight beads, one file, zero

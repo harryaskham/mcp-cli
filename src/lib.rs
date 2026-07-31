@@ -1,4 +1,4 @@
-//! `mcp-cli` exposes one command implementation through both a traditional CLI
+//! `mcp-cli-core` exposes one command implementation through both a traditional CLI
 //! JSON surface and a Model Context Protocol (MCP) stdio server. Consumers
 //! provide typed inputs, outputs, and [`StructuredError`] values; this crate
 //! handles envelopes, JSON schema generation, MCP framing, tool listing, and
