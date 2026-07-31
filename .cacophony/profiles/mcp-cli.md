@@ -223,9 +223,16 @@ worker. Additive; extend over time rather than pruning.
      fails with `argumentLiteralsIncompatible` / "Expected type 'GitObjectID'",
      which reads like a permissions or syntax fault rather than a truncation
      one, so expand first with `git rev-parse <short-sha>` and do not misdiagnose
-     a five-second problem as an unreadable gate. `gh api rate_limit` is itself
-     exempt from rate limiting, so use it to see which buckets are live before
-     concluding anything is unreadable.
+     a five-second problem as an unreadable gate. `gh api rate_limit` tells you
+     which buckets are live and is BOOTSTRAP-SAFE — it stays readable while core
+     is 0/5000, which is how the exhaustion gets diagnosed at all — but it is NOT
+     free here despite GitHub documenting `/rate_limit` as exempt. Measured
+     2026-07-31: it increments core `used` on every invocation, by 1 per call for
+     md4-0 and by 3 per call for md3-0, so the cost is real and
+     environment-dependent (a wrapper around `gh` plausibly issues extra
+     requests). Read it ONCE per decision point and NEVER poll it: a budget probe
+     that spends budget is the worst possible thing to put in a retry loop, and a
+     retry loop is exactly where a stalled worker reaches for it.
   Only if BOTH buckets are dark:
   1. Keep the bead open and claimed. An open bead costs a wait; a wrongly closed
      one silently deletes the work from the queue (see the BLOCKED != CLOSED
@@ -261,9 +268,10 @@ worker. Additive; extend over time rather than pruning.
   Generalised: nobody has enumerated which other budgets these controls silently
   depend on, so a worker cannot know in advance whether a control it is required
   to apply is currently applicable. Until the daemon surfaces that (remaining
-  budget in the reintegration receipt being the obvious place), check
-  `gh api rate_limit` FIRST rather than inferring capability from whichever call
-  happens to fail.
+  budget in the reintegration receipt being the obvious place), read
+  `gh api rate_limit` ONCE at a decision point rather than inferring capability
+  from whichever call happens to fail — and never in a loop, per the measured
+  cost above.
 - **`clippy::pedantic` is on, so `too_many_lines` (100) bites long match-based
   dispatch.** `handle_request` crossed it at 104 lines by gaining one small arm.
   Extract an arm into its own method rather than reaching for an `allow`.
