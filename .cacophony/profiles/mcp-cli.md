@@ -44,6 +44,20 @@ builds against the pinned submodule commit.
 Concrete lifecycle gotchas observed while operating as the persistent mcp-cli
 worker. Additive; extend over time rather than pruning.
 
+**A caveat about this document, which is the most useful thing on it.** Writing
+a lesson down is necessary and not sufficient. The `cargo fmt | tail` note below
+was written by an earlier session of this agent, described ONE COMMAND rather
+than the category it belonged to, and sat here for a month while the same
+failure — a truncated read of command output standing in for the output —
+recurred twice more in a single day, across both workers, in disguises the note
+did not cover. So: when you add a note, ask whether you are describing an
+instance or a CLASS, and write the class. And when a lesson already here fires
+again in new clothes, GENERALISE the existing note rather than adding a sibling
+beside it — a second instance is evidence the first was written too narrowly.
+Where the class admits a mechanical fix (a command, a changed default), prefer
+that to a written habit: a habit must be remembered in every disguise, a
+mechanism only has to run.
+
 - **Direct cargo is allowed here.** This project does not intercept heavyweight
   commands, so run `cargo fmt`/`clippy`/`test` directly in the checkout for smoke
   validation; no `caco test run` queue is required.
@@ -107,10 +121,21 @@ worker. Additive; extend over time rather than pruning.
   then only evidence their OWN filing with a receipt and an exit code — so by
   that bead's own four-valued constraint the honest classification of its
   provenance is `SOURCE UNAVAILABLE`, not `DONE`.
-- **Do not pipe `cargo fmt --all -- --check` through `tail`/`head`.** A pipeline's
-  exit status is the last command's, so `cargo fmt --check | tail` reports success
-  even when rustfmt found a diff (exit 1). Run the check unpiped and inspect `$?`,
-  or just run `cargo fmt --all` and `git diff` before committing.
+- **Beware truncated reads of command output — the informative line is as often
+  FIRST as last.** We pipe through `tail`/`head` because output is long, so this
+  is a tooling default rather than an attention failure, and a habit will not fix
+  it; change what you read. Instances seen so far, all the same class:
+  - `cargo fmt --all -- --check | tail` reports SUCCESS even when rustfmt found a
+    diff, because a pipeline's exit status is the last command's. Run it unpiped
+    and inspect `$?`, or run `cargo fmt --all` and `git diff` before committing.
+  - `caco bd update` prints its receipt on line 1; reading the tail made a
+    successful update look ambiguous.
+  - a `caco agent rebase` and an inspection issued in one breath read the tree
+    BEFORE the rebase landed, making a landed commit look missing. For any
+    "is X on main" question use `git ls-tree`/`git show` against `origin/main`,
+    which does not depend on the working tree being current.
+  Grep whole output for the signal, or read the head AND the tail, before
+  concluding anything from a truncated view.
 - **Maintenance-window flaps are expected, not product bugs.** During fleet-wide
   node outages / Nix-update / TLS-restart windows you will see transient
   `beads proxy to the active primary is temporarily unavailable`,
