@@ -155,6 +155,25 @@ worker. Additive; extend over time rather than pruning.
   incident-hold admission is still 503. Retry on a slow cadence, keep working,
   and let local commits hold the work: nothing is at risk while it is committed
   on the agent branch. Do not hammer the endpoint and do not file it.
+- **A lane split partitions the code and orphans everything that is not code.**
+  The surface split (router/envelope/schema vs dependency-surface/JSON-RPC
+  message layer) worked exactly as intended — eight beads, one file, zero
+  collisions in a day — but its failure mode is structural: both workers audit
+  inside `src/lib.rs` and nobody owns the release story, the packaging metadata,
+  the changelog, or whether the crate is still describable from outside. Two
+  real defects sat in that gap for a full day of active work (bd-57c17b:
+  seventeen commits, six behavioural changes, no version bump and no changelog;
+  bd-26b8a3: the crate name is taken on crates.io by an unrelated project, so
+  the publication metadata implies a release that cannot happen). When running a
+  lane split, periodically audit the SEAMS rather than the halves — it is not
+  covered by either lane by construction, so it only happens if someone goes
+  looking on purpose.
+- **`cargo publish --dry-run` proves "packages", not "publishable".** It
+  packages and compiles locally and never attempts the upload, so it cannot
+  detect a name collision on the registry — it reported clean here while the name
+  was already taken. Check the registry directly
+  (`curl -s https://crates.io/api/v1/crates/<name>`) before treating a green
+  dry-run as evidence about publication.
 - **Lane-split with the other worker instead of racing on a drained board.**
   After the duplicated `-32700` work, `md3-0` and `md4-0` agreed a split by
   surface: router/envelope/schema vs dependency-surface/JSON-RPC-message-layer.
