@@ -19,6 +19,16 @@ learn about them.
 
 ### Changed
 
+- **BREAKING** — The package is renamed from `mcp-cli` to `mcp-cli-core`, because
+  the `mcp-cli` name on crates.io belongs to an unrelated project. The **library**
+  name is unchanged, so `use mcp_cli::...` paths still compile; only the
+  dependency key moves (`bd-26b8a3`, `db4c2d1`). Downstream, either:
+
+  ```toml
+  mcp-cli-core = { git = "..." }            # rename the key, or
+  mcp-cli = { git = "...", package = "mcp-cli-core" }   # keep it
+  ```
+
 - **BREAKING** — Tool registration now rejects, rather than silently accepting,
   registrations that cannot work. `add_tool` and the typed helpers **panic**;
   `try_add_tool` returns a structured error and leaves the router unchanged:

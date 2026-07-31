@@ -1,0 +1,43 @@
+name: Crate name
+
+# Asserts that this package's crate-name is free on crates.io, or already ours
+# (bd-ab0c67).
+#
+# `cargo publish --dry-run` cannot answer this: it packages and compiles locally
+# and never attempts the upload, so it reported clean for the entire time the
+# `mcp-cli` name was owned by an unrelated project. This is the check that can
+# actually fail for the reason you run it.
+#
+# Deliberately a SEPARATE workflow from ci.yml rather than another step in the
+# `check` job:
+#   - `check` is the required context that auto-merge waits on. A crate-name
+#     collision is a packaging fact, not a defect in the change under test, and
+#     it should not block every merge in the repo.
+#   - ci.yml runs on every push and PR. This answer changes rarely and costs an
+#     external call, so it runs weekly and when packaging metadata moves.
+on:
+  schedule:
+    # Weekly, offset off the hour to avoid the cron stampede.
+    - cron: '17 4 * * 1'
+  push:
+    branches: [main]
+    paths:
+      - 'Cargo.toml'
+      - '.github/scripts/assert-crate-name.sh'
+      - '.github/workflows/crate-name.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'Cargo.toml'
+      - '.github/scripts/assert-crate-name.sh'
+      - '.github/workflows/crate-name.yml'
+  workflow_dispatch:
+
+jobs:
+  name-available:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Assert the crate name is free or already ours
+        run: ./.github/scripts/assert-crate-name.sh
