@@ -316,6 +316,31 @@ worker. Additive; extend over time rather than pruning.
      the recorded evidence rather than choosing between closing blind and
      holding indefinitely. Do not hand-roll a raw API call to dodge `gh` — note
      that `gh api graphql` above is NOT that, it is a sanctioned `gh` path.
+- **If a composite "is this actually done" check is ever built (`caco bd verify`,
+  proposed by md4-0 as `bd-76916a` in the `cacophony` project), three things
+  from today's evidence should shape it.** The four separate profile
+  instructions — prefer `landed_commit` over local `HEAD`, `ls-tree` over the
+  working tree, the check verdict over the sha, a re-read over a receipt — are
+  one instruction wearing four hats, and a command has to be run once where a
+  written habit has to be remembered four ways at four moments. But:
+  1. It must handle DISAGREEMENT BETWEEN AUTHORITATIVE SOURCES, not merely
+     prefer authoritative over local. In the bd-c97ee3 episode the authoritative
+     re-read was itself wrong: `bd show` reported `in_progress` once and then
+     transport-failed, while the bead was closed. A verify trusting one re-read
+     would have confidently reported not-done. `sources disagree` and `source
+     unavailable` must be OUTCOMES, distinct from done and not-done — collapsing
+     either into a boolean reintroduces the exact failure the command exists to
+     prevent, a confident wrong answer.
+  2. It must fail CLOSED, unlike `assert-crate-name.sh`. That check correctly
+     warns-and-passes when crates.io is unreachable, because a registry blip must
+     not redden the required check. The opposite default is right here: for "is
+     this done", unknown must never present as done. Same authors, same week,
+     opposite correct defaults — the difference is which direction a wrong answer
+     hurts in.
+  3. The check-verdict leg needs FULL 40-character oids; GraphQL rejects a short
+     sha with `argumentLiteralsIncompatible` / "Expected type 'GitObjectID'",
+     which reads like a permissions fault rather than truncation. `git rev-parse`
+     first.
 - **A malformed `caco bd close` receipt is not evidence either way, and a single
   `caco bd show` is not authoritative.** Observed 2026-07-31: `close` returned
   `closed: ? — ?`, an immediate `bd show` reported the bead still
