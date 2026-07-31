@@ -91,6 +91,34 @@ is rejected, so a nested struct using `$defs` / `$ref` registers normally.
 
 ## MCP protocol support
 
+> **stdout is the protocol channel.** `serve_stdio` frames everything this
+> process writes to stdout as protocol output. The hazard is broader than a
+> stray `println!` in a handler — it is **anything the consumer installs that
+> can reach file descriptor 1**:
+>
+> - a `println!` or `dbg!` in a tool handler, or a dependency that logs to
+>   stdout;
+> - a `tracing`/`log` subscriber left on its default sink, which is commonly
+>   stdout — the case most likely to bite, since nobody wires a `println!` into
+>   a handler on purpose but plenty of people wire a logger without thinking
+>   about where it lands;
+> - a **custom panic hook** that writes to stdout. Rust's default hook prints to
+>   stderr, which is correct; a hook redirected to stdout corrupts the stream at
+>   exactly the moment a tool is failing, interleaved with the error response
+>   for that same request.
+>
+> Any of them is emitted as its own frame:
+>
+> ```text
+> DEBUG: about to do work                       <- a println! in a handler
+> {"id":1,"jsonrpc":"2.0","result":{ ... }}     <- the actual response
+> ```
+>
+> The symptom a client reports is a non-JSON frame, or the session simply
+> dropping — many MCP clients treat unparseable server output as fatal. Route
+> **all** consumer output to stderr. This crate cannot enforce it: redirecting
+> the file descriptor would require `unsafe`, which the crate forbids.
+
 `McpServer::serve_stdio` (and `serve_transport`) speak MCP over stdio using
 newline-delimited JSON (NDJSON): one JSON-RPC message per line terminated by
 `\n`, with blank separator lines tolerated. Supported methods:

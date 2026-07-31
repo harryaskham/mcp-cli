@@ -744,6 +744,39 @@ impl<Ctx> McpServer<Ctx> {
         }
     }
 
+    /// Serve the MCP protocol over this process's stdin/stdout.
+    ///
+    /// # stdout is the protocol channel
+    ///
+    /// Everything this process writes to stdout is framed as protocol output.
+    /// That makes the hazard broader than a stray `println!` in a handler — it
+    /// is ANYTHING the consumer installs that can reach file descriptor 1:
+    ///
+    /// - a `println!` or `dbg!` in a tool handler, or a dependency that logs to
+    ///   stdout;
+    /// - a `tracing`/`log` subscriber left on its default sink, which is
+    ///   commonly stdout — the case most likely to bite, since nobody wires a
+    ///   `println!` into a handler on purpose but plenty of people wire a logger
+    ///   without thinking about where it lands;
+    /// - a CUSTOM PANIC HOOK that writes to stdout. Rust's default hook prints
+    ///   to stderr, which is correct and is part of why a caught handler panic
+    ///   is more visible rather than less; a hook redirected to stdout instead
+    ///   corrupts the stream at exactly the moment a tool is failing, and the
+    ///   garbage frame arrives interleaved with the error response for that same
+    ///   request.
+    ///
+    /// Any of them is emitted into the stream as its own frame:
+    ///
+    /// ```text
+    /// DEBUG: about to do work                       <- a println! in a handler
+    /// {"id":1,"jsonrpc":"2.0","result":{ ... }}     <- the actual response
+    /// ```
+    ///
+    /// The observable symptom is a client reporting a non-JSON frame, or simply
+    /// dropping the session: many MCP clients treat unparseable server output as
+    /// fatal. Route ALL consumer output to stderr. This crate cannot enforce
+    /// that: redirecting the file descriptor would need `unsafe`, which the
+    /// crate forbids.
     pub fn serve_stdio(&self, ctx: &Ctx) -> Result<(), McpCliError> {
         let stdin = io::stdin();
         let stdout = io::stdout();
@@ -752,6 +785,13 @@ impl<Ctx> McpServer<Ctx> {
         self.serve_transport(ctx, reader, writer)
     }
 
+    /// Serve the MCP protocol over an arbitrary reader/writer pair.
+    ///
+    /// The writer receives protocol frames only. When that writer is this
+    /// process's stdout — as with [`McpServer::serve_stdio`] — anything else the
+    /// process prints to stdout is interleaved into the protocol stream and
+    /// corrupts it; see that method's warning. Consumer logging belongs on
+    /// stderr.
     pub fn serve_transport<R, W>(
         &self,
         ctx: &Ctx,
