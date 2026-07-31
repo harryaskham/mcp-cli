@@ -96,6 +96,17 @@ worker. Additive; extend over time rather than pruning.
   triaged it since, and clobbering a triage note is the worse trade. Put durable
   cross-project reasoning in THIS profile, which is readable and versioned, and
   route the cross-project ask to a controller/operator.
+  The narrow product fix is NOT project read scope. It is **read-back of your
+  own writes**: a cross-project `create`/`update` receipt that echoes the
+  canonical stored content, or read access limited to beads this caller
+  authored. That closes the door exactly — an author can confirm what landed —
+  while granting nothing about the rest of the project. Worth preferring over
+  the broader grant whenever this is raised (follow-on to md4-0's bd-22bd0d).
+  Demonstrated at its sharpest 2026-07-31: md4-0 filed and amended `bd-76916a`,
+  a bead arguing that receipts are insufficient evidence of state, and could
+  then only evidence their OWN filing with a receipt and an exit code — so by
+  that bead's own four-valued constraint the honest classification of its
+  provenance is `SOURCE UNAVAILABLE`, not `DONE`.
 - **Do not pipe `cargo fmt --all -- --check` through `tail`/`head`.** A pipeline's
   exit status is the last command's, so `cargo fmt --check | tail` reports success
   even when rustfmt found a diff (exit 1). Run the check unpiped and inspect `$?`,
