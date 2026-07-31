@@ -54,6 +54,7 @@
 //! structured content.
 
 use std::io::{self, BufRead, BufReader, Read, Write};
+use std::panic::{self, AssertUnwindSafe};
 use std::sync::Arc;
 
 use schemars::JsonSchema;
@@ -430,9 +431,56 @@ impl<Ctx> Tool<Ctx> {
         &self.metadata
     }
 
+    /// Invoke the tool, converting a panic in the handler into a tool-level
+    /// error rather than letting it end the process.
+    ///
+    /// The server is mid-obligation when a handler runs: a client is blocking on
+    /// a JSON-RPC id, further requests are already buffered behind this one, and
+    /// the session is expected to outlive the call. An unwinding panic breaks all
+    /// three silently — the peer sees a closed pipe with no code, no message, and
+    /// no indication of which tool failed. Catching here is not about owning the
+    /// call site (`Iterator::map` owns one too and rightly does not catch); it is
+    /// that this call site has an unfulfilled promise to a third party, which is
+    /// the same reason `axum` and `actix` catch per request.
+    ///
+    /// Reporting the panic as `tool_panicked` makes the bug *more* visible than
+    /// the status quo, not less: the client learns which tool failed and why, and
+    /// the default panic hook still writes the message and location to stderr.
+    ///
+    /// Two limits, both real, neither of which this can fix:
+    ///
+    /// - It does nothing under `panic = "abort"`, where there is no unwind to
+    ///   catch. This is a mitigation, not a guarantee.
+    /// - It does not restore consistency. A caught panic leaves `Ctx` exactly as
+    ///   the handler left it, so a half-updated cache or partly-applied batch
+    ///   survives into subsequent calls. `Mutex` poisoning surfaces that; a
+    ///   `RefCell` or atomics based `Ctx` will not. `tool_panicked` therefore
+    ///   reports a bug to FIX, not a condition to handle.
     #[must_use]
     pub fn call(&self, ctx: &Ctx, arguments: Value) -> JsonEnvelope<Value> {
-        (self.handler)(ctx, arguments)
+        // `AssertUnwindSafe` is forced here, not chosen for convenience. The
+        // closure captures `&Ctx`, which is `UnwindSafe` only when
+        // `Ctx: RefUnwindSafe`, and `&Tool<Ctx>`, which never is: the handler is
+        // an `Arc<dyn Fn(..)>` and `dyn Fn` is not `RefUnwindSafe`. Adding a
+        // `Ctx: RefUnwindSafe` bound therefore would not compile either, and
+        // would exclude every `RefCell`-based single-threaded `Ctx` for nothing.
+        let outcome = panic::catch_unwind(AssertUnwindSafe(|| (self.handler)(ctx, arguments)));
+
+        match outcome {
+            Ok(envelope) => envelope,
+            Err(payload) => JsonEnvelope::error_for(
+                self.metadata.name.clone(),
+                JsonError::new(
+                    ErrorCategory::ExecutionFailure,
+                    "tool_panicked",
+                    format!(
+                        "tool `{}` panicked: {}",
+                        self.metadata.name,
+                        panic_message(&payload)
+                    ),
+                ),
+            ),
+        }
     }
 }
 
@@ -936,6 +984,22 @@ fn negotiate_protocol_version(requested: Option<&str>) -> &'static str {
             .unwrap_or(latest),
         None => latest,
     }
+}
+
+/// Recover a human-readable message from a caught panic payload.
+///
+/// `panic!` payloads are `&'static str` for a literal and `String` once
+/// formatted; anything else is reported opaquely rather than guessed at.
+fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
+    payload.downcast_ref::<&'static str>().map_or_else(
+        || {
+            payload
+                .downcast_ref::<String>()
+                .cloned()
+                .unwrap_or_else(|| "panic payload of unknown type".to_owned())
+        },
+        |message| (*message).to_owned(),
+    )
 }
 
 /// Derive the advertised `outputSchema` for a tool returning `Output`.
@@ -1569,6 +1633,95 @@ mod tests {
             "A colliding registration.",
             |(), args: AddArgs| Ok::<_, SampleError>(json!({ "sum": args.lhs + args.rhs })),
         );
+    }
+
+    #[test]
+    fn a_panicking_handler_becomes_a_tool_error_not_a_dead_process() {
+        // Before this, an unwinding handler took the whole process with it: no
+        // response for the panicking call, no response for anything queued behind
+        // it, and a closed pipe as the client's only signal.
+        let mut router: ToolRouter<()> = ToolRouter::new();
+        router.add_typed_tool("risky", "Panics on demand.", |(), args: EchoArgs| {
+            assert!(!args.uppercase, "tool handler blew up");
+            Ok::<_, SampleError>(json!({ "text": args.text }))
+        });
+
+        let envelope = router.call_tool(&(), "risky", json!({ "text": "hi", "uppercase": true }));
+
+        assert!(envelope.is_error());
+        let rendered = serde_json::to_value(&envelope).expect("envelope serializes");
+        assert_eq!(rendered["error"]["code"], "tool_panicked");
+        assert_eq!(rendered["error"]["category"], "execution_failure");
+        // The panic's own message is surfaced, so the client learns which tool
+        // failed and why rather than inferring it from a closed pipe.
+        let message = rendered["error"]["message"]
+            .as_str()
+            .expect("message is a string");
+        assert!(message.contains("risky"), "{message}");
+        assert!(message.contains("tool handler blew up"), "{message}");
+    }
+
+    #[test]
+    fn a_panicking_handler_does_not_strand_the_requests_behind_it() {
+        // The obligation that makes catching correct here: a client is blocking
+        // on an id, and further requests are already buffered behind this one.
+        let mut router: ToolRouter<()> = ToolRouter::new();
+        router.add_typed_tool(
+            "risky",
+            "Panics on demand.",
+            |(), _args: EchoArgs| -> Result<Value, SampleError> { panic!("handler exploded") },
+        );
+        router.add_typed_tool("math_add", "Add two integers.", |(), args: AddArgs| {
+            Ok::<_, SampleError>(json!({ "sum": args.lhs + args.rhs }))
+        });
+
+        let server = McpServer::new(
+            StdioServerConfig {
+                server_name: "sample-mcp".to_string(),
+                server_version: "0.0.1".to_string(),
+            },
+            router,
+        );
+
+        let input = [
+            frame_request(&json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": { "name": "risky", "arguments": { "text": "x", "uppercase": false } }
+            })),
+            frame_request(&json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": { "name": "math_add", "arguments": { "lhs": 2, "rhs": 3 } }
+            })),
+        ]
+        .concat();
+
+        let mut output = Vec::new();
+        server
+            .serve_transport(&(), std::io::Cursor::new(input), &mut output)
+            .expect("a panicking handler must not end the session");
+
+        let responses = parse_framed_responses(&output);
+        assert_eq!(responses.len(), 2);
+        // The panicking call is answered as a tool-level failure, not a
+        // JSON-RPC error and not silence.
+        assert_eq!(responses[0]["id"], 1);
+        assert_eq!(responses[0]["result"]["isError"], true);
+        assert_eq!(
+            responses[0]["result"]["structuredContent"]["error"]["code"],
+            "tool_panicked"
+        );
+        assert!(responses[0]["error"].is_null());
+        // The request queued behind it still runs.
+        assert_eq!(responses[1]["id"], 2);
+        assert_eq!(
+            responses[1]["result"]["structuredContent"]["data"]["sum"],
+            5
+        );
+        assert_eq!(responses[1]["result"]["isError"], false);
     }
 
     #[test]

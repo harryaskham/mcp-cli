@@ -125,6 +125,13 @@ serving, rather than tearing the connection down:
 - `-32601` Method not found — an unknown MCP method.
 - `-32602` Invalid params — a `tools/call` whose params do not deserialize.
 
+A tool handler that **panics** is caught and reported as a tool-level failure —
+`isError` with code `tool_panicked` — so the client learns which tool failed and
+why, and requests queued behind it are still served. Two limits worth knowing:
+it cannot help under `panic = "abort"`, where there is no unwind to catch, and it
+does not restore consistency, since `Ctx` is left exactly as the handler left it.
+`tool_panicked` reports a bug to fix, not a condition to handle.
+
 The stdio transport is newline-delimited with no length prefix, so a single
 frame is capped at `DEFAULT_MAX_FRAME_BYTES` (16 MiB) to keep a peer that never
 emits a newline from forcing an unbounded allocation. An oversized frame is
