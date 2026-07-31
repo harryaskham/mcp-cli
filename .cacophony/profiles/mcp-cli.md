@@ -56,7 +56,30 @@ again in new clothes, GENERALISE the existing note rather than adding a sibling
 beside it — a second instance is evidence the first was written too narrowly.
 Where the class admits a mechanical fix (a command, a changed default), prefer
 that to a written habit: a habit must be remembered in every disguise, a
-mechanism only has to run.
+mechanism only has to run. And note the sharper form: a written habit that has
+ALREADY FAILED is evidence FOR the mechanism — this file records those failures
+without drawing that conclusion, so it accumulates the case for its own
+replacement without noticing.
+
+**The rule above is retrospective as well as prospective** (md4-0). It licenses
+auditing the notes ALREADY here for ones that have fired more than once and are
+still written as instances — the same pass that turned the `cargo fmt | tail`
+note into its class, applied to the rest. That should be a reader's first
+question rather than a later discovery, so two candidates already visible from
+direct evidence:
+
+- The **authority-node unavailability** notes are currently two siblings
+  ("maintenance-window flaps are expected" and "`incident-hold admission
+  unavailable` is the other half of the same outage") describing one class that
+  presented in at least three shapes in a single day — beads-proxy unavailable,
+  incident-hold 503 fail-closed, and `assignment source was first_class`. By
+  this rule they want to be ONE note: the shapes, and the single recovery signal
+  (a clean `caco bd sync`).
+- The **"a reported failure may have actually succeeded"** notes — reintegrate
+  timeout that landed, close-validator 412 on landed work — are plausibly the
+  same class as "an action receipt is not system state", which arrived much
+  later from a different direction. Worth checking whether one note covers all
+  three.
 
 - **Direct cargo is allowed here.** This project does not intercept heavyweight
   commands, so run `cargo fmt`/`clippy`/`test` directly in the checkout for smoke
