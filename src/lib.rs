@@ -455,14 +455,21 @@ impl<Ctx> ToolRouter<Ctx> {
 
     /// Register a tool, replacing nothing: tool names must be unique.
     ///
+    /// Only the router's own invariants are enforced: a name must identify
+    /// exactly one tool, and the input schema must be one MCP accepts. Charset
+    /// and length limits imposed by a downstream host are that consumer's
+    /// concern — layer them over [`ToolRouter::try_add_tool`].
+    ///
     /// # Panics
     ///
-    /// Panics if a tool with the same name is already registered, or if the
-    /// tool's input schema declares a non-object root type. Registration is a
-    /// startup-time concern, and both are programming errors that would
-    /// otherwise be silent: a duplicate name leaves the second registration
-    /// unreachable, and a non-object input schema ships metadata MCP clients
-    /// reject. Use [`ToolRouter::try_add_tool`] to handle either case instead.
+    /// Panics if the name is empty or whitespace-only, if a tool with the same
+    /// name is already registered, or if the tool's input schema declares a
+    /// non-object root type. Registration is a startup-time concern, and each is
+    /// a programming error that would otherwise be reported far from its cause:
+    /// an unnameable tool surfaces as `TargetNotFound` at call time in the
+    /// client, a duplicate name leaves the second registration unreachable, and
+    /// a non-object input schema ships metadata MCP clients reject. Use
+    /// [`ToolRouter::try_add_tool`] to handle any of them instead.
     pub fn add_tool(&mut self, tool: Tool<Ctx>) {
         if let Err(error) = self.try_add_tool(tool) {
             panic!("{}", error.message());
@@ -478,12 +485,21 @@ impl<Ctx> ToolRouter<Ctx> {
     ///
     /// # Errors
     ///
-    /// Returns a [`JsonError`] with code `invalid_input_schema` when the tool's
-    /// input schema declares a non-object root type, or `duplicate_tool_name`
-    /// when a tool with the same name is already registered. The router is left
-    /// unchanged in both cases.
+    /// Returns a [`JsonError`] with code `invalid_tool_name` when the name is
+    /// empty or whitespace-only, `invalid_input_schema` when the tool's input
+    /// schema declares a non-object root type, or `duplicate_tool_name` when a
+    /// tool with the same name is already registered. The router is left
+    /// unchanged in every case.
     pub fn try_add_tool(&mut self, tool: Tool<Ctx>) -> Result<(), JsonError> {
         let name = &tool.metadata().name;
+        if name.trim().is_empty() {
+            return Err(JsonError::new(
+                ErrorCategory::Validation,
+                "invalid_tool_name",
+                "a tool name must not be empty or whitespace-only".to_owned(),
+            ));
+        }
+
         if let Some(error) = non_object_input_schema_error(name, &tool.metadata().input_schema) {
             return Err(error);
         }
@@ -734,37 +750,7 @@ impl<Ctx> McpServer<Ctx> {
         request: JsonRpcRequest,
     ) -> Result<Option<Value>, McpCliError> {
         let response = match request.method.as_str() {
-            "initialize" => {
-                // Negotiate the protocol version: echo the client's requested
-                // version when supported, otherwise advertise our latest. The
-                // borrow of `request.params` is released before `request.id` is
-                // moved into the response below.
-                let protocol_version = negotiate_protocol_version(
-                    request
-                        .params
-                        .as_ref()
-                        .and_then(|params| params.get("protocolVersion"))
-                        .and_then(Value::as_str),
-                );
-                request.id.map(|id| {
-                    json!({
-                        "jsonrpc": "2.0",
-                        "id": id,
-                        "result": {
-                            "protocolVersion": protocol_version,
-                            "capabilities": {
-                                "tools": {
-                                    "listChanged": false
-                                }
-                            },
-                            "serverInfo": {
-                                "name": self.config.server_name,
-                                "version": self.config.server_version
-                            }
-                        }
-                    })
-                })
-            }
+            "initialize" => self.handle_initialize(request.id, request.params.as_ref()),
             // A notification carries no id and gets no response. If a client
             // does send an id, JSON-RPC 2.0 makes this a request that MUST be
             // answered, so reply with an empty result exactly as `ping` does
@@ -793,52 +779,7 @@ impl<Ctx> McpServer<Ctx> {
                     }
                 })
             }),
-            "tools/call" => {
-                match serde_json::from_value::<ToolCallParams>(
-                    request.params.unwrap_or_else(|| json!({})),
-                ) {
-                    Ok(params) => {
-                        let envelope = self.router.call_tool(
-                            ctx,
-                            &params.name,
-                            params.arguments.unwrap_or_else(|| json!({})),
-                        );
-                        let structured_content = serde_json::to_value(&envelope)?;
-                        let text_content = serde_json::to_string(&envelope)?;
-
-                        request.id.map(|id| {
-                            json!({
-                                "jsonrpc": "2.0",
-                                "id": id,
-                                "result": {
-                                    "content": [
-                                        {
-                                            "type": "text",
-                                            "text": text_content
-                                        }
-                                    ],
-                                    "structuredContent": structured_content,
-                                    "isError": envelope.is_error()
-                                }
-                            })
-                        })
-                    }
-                    // A `tools/call` whose params do not match the expected shape
-                    // (e.g. missing `name`) is Invalid params. Respond with the
-                    // JSON-RPC `-32602` error and keep serving instead of
-                    // propagating a transport error that drops the session.
-                    Err(error) => request.id.map(|id| {
-                        json!({
-                            "jsonrpc": "2.0",
-                            "id": id,
-                            "error": {
-                                "code": -32602,
-                                "message": format!("invalid params: {error}")
-                            }
-                        })
-                    }),
-                }
-            }
+            "tools/call" => self.handle_tool_call(ctx, request.id, request.params)?,
             method => request.id.map(|id| {
                 json!({
                     "jsonrpc": "2.0",
@@ -852,6 +793,92 @@ impl<Ctx> McpServer<Ctx> {
         };
 
         Ok(response)
+    }
+
+    /// Answer `initialize`, negotiating the protocol version.
+    ///
+    /// The client's requested version is echoed when supported, otherwise the
+    /// server advertises its latest.
+    fn handle_initialize(&self, id: Option<Value>, params: Option<&Value>) -> Option<Value> {
+        let protocol_version = negotiate_protocol_version(
+            params
+                .and_then(|params| params.get("protocolVersion"))
+                .and_then(Value::as_str),
+        );
+
+        id.map(|id| {
+            json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {
+                    "protocolVersion": protocol_version,
+                    "capabilities": {
+                        "tools": {
+                            "listChanged": false
+                        }
+                    },
+                    "serverInfo": {
+                        "name": self.config.server_name,
+                        "version": self.config.server_version
+                    }
+                }
+            })
+        })
+    }
+
+    /// Answer `tools/call`, returning both `structuredContent` and a `text`
+    /// content block, with `isError` reflecting tool failure.
+    fn handle_tool_call(
+        &self,
+        ctx: &Ctx,
+        id: Option<Value>,
+        params: Option<Value>,
+    ) -> Result<Option<Value>, McpCliError> {
+        let params =
+            match serde_json::from_value::<ToolCallParams>(params.unwrap_or_else(|| json!({}))) {
+                Ok(params) => params,
+                // A `tools/call` whose params do not match the expected shape (e.g.
+                // missing `name`) is Invalid params. Respond with the JSON-RPC
+                // `-32602` error and keep serving instead of propagating a transport
+                // error that drops the session.
+                Err(error) => {
+                    return Ok(id.map(|id| {
+                        json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "error": {
+                                "code": -32602,
+                                "message": format!("invalid params: {error}")
+                            }
+                        })
+                    }));
+                }
+            };
+
+        let envelope = self.router.call_tool(
+            ctx,
+            &params.name,
+            params.arguments.unwrap_or_else(|| json!({})),
+        );
+        let structured_content = serde_json::to_value(&envelope)?;
+        let text_content = serde_json::to_string(&envelope)?;
+
+        Ok(id.map(|id| {
+            json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": text_content
+                        }
+                    ],
+                    "structuredContent": structured_content,
+                    "isError": envelope.is_error()
+                }
+            })
+        }))
     }
 }
 
@@ -1442,6 +1469,44 @@ mod tests {
     }
 
     #[test]
+    fn router_rejects_a_name_that_cannot_identify_a_tool() {
+        // A name exists to identify a tool, so a name that identifies nothing is
+        // a broken registration on this crate's own terms. Left unchecked it is
+        // also reported in the wrong place: the failure would not surface until a
+        // `tools/call` came back TargetNotFound, at call time, in the client,
+        // pointing at the caller — when the defect was in the registration line.
+        for name in ["", " ", "\t", "\n", "   \t "] {
+            let error = ToolRouter::<()>::new()
+                .try_add_tool_for_test::<AddArgs>(name)
+                .expect_err("an unnameable tool should be rejected");
+
+            assert_eq!(error.code(), "invalid_tool_name", "for {name:?}");
+            assert_eq!(error.category(), ErrorCategory::Validation, "for {name:?}");
+        }
+    }
+
+    #[test]
+    fn router_does_not_import_a_downstream_host_charset_rule() {
+        // Charset and length are somebody else's constraint. A consumer talking
+        // to a host with a stricter function-name rule layers its own check over
+        // try_add_tool; a consumer that is not must not be forced to.
+        for name in ["my tool", "tool.with.dots", "tool/with/slashes", "工具"] {
+            ToolRouter::<()>::new()
+                .try_add_tool_for_test::<AddArgs>(name)
+                .unwrap_or_else(|error| panic!("{name:?} should register: {}", error.message()));
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "must not be empty or whitespace-only")]
+    fn add_typed_tool_panics_on_an_unnameable_tool() {
+        let mut router = ToolRouter::<()>::new();
+        router.add_typed_tool("  ", "An unnameable tool.", |(), args: AddArgs| {
+            Ok::<_, SampleError>(json!({ "sum": args.lhs + args.rhs }))
+        });
+    }
+
+    #[test]
     fn router_rejects_a_duplicate_tool_name_with_a_structured_error() {
         // A duplicate registration would otherwise be silent: `tools/list` would
         // advertise the name twice and `call_tool` would dispatch to the first
@@ -1668,6 +1733,60 @@ mod tests {
         assert!(
             output.is_empty(),
             "initialized notification must not produce a response"
+        );
+    }
+
+    #[test]
+    fn stdio_server_treats_every_arm_without_an_id_as_a_notification() {
+        // The id-presence rule is a property of every arm, not just the
+        // notification method: a request object with no id gets no response
+        // frame, whatever it asked for. This is the invariant most easily lost
+        // when an arm is lifted into its own method, because the natural
+        // refactor returns a Value and reattaches the id at the end — so it is
+        // pinned here for `initialize` and for both `tools/call` paths, the
+        // arms extracted in bd-46f7d2.
+        let server = sample_server();
+
+        let input = [
+            // initialize, no id
+            frame_request(&json!({
+                "jsonrpc": "2.0",
+                "method": "initialize",
+                "params": { "protocolVersion": "2024-11-05" }
+            })),
+            // tools/call with valid params, no id
+            frame_request(&json!({
+                "jsonrpc": "2.0",
+                "method": "tools/call",
+                "params": {
+                    "name": "math_add",
+                    "arguments": { "lhs": 2, "rhs": 3 }
+                }
+            })),
+            // tools/call whose params do not deserialize, no id: the -32602
+            // path must respect id-absence too.
+            frame_request(&json!({
+                "jsonrpc": "2.0",
+                "method": "tools/call",
+                "params": { "not_a_name": true }
+            })),
+            // tools/list, no id
+            frame_request(&json!({
+                "jsonrpc": "2.0",
+                "method": "tools/list"
+            })),
+        ]
+        .concat();
+
+        let mut output = Vec::new();
+        server
+            .serve_transport(&(), std::io::Cursor::new(input), &mut output)
+            .expect("notifications should be accepted");
+
+        assert!(
+            output.is_empty(),
+            "no arm may answer a request that carries no id: {}",
+            String::from_utf8_lossy(&output)
         );
     }
 

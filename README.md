@@ -64,19 +64,27 @@ same stable envelope shape that MCP `tools/call` returns as structured content.
 
 ## Tool registration
 
-Tool names must be unique within a router, and a tool's input type must derive a
-JSON Schema **object**: MCP constrains `inputSchema` to an object, so a scalar,
-sequence, or enum input derives metadata strict clients reject. Declare a struct
-input. Both problems are caught at registration rather than surfacing later in a
-client.
+The router enforces its own invariants and nothing else. A tool name must be
+non-empty and unique, because a name exists to identify exactly one tool, and a
+tool's input type must derive a JSON Schema **object**, because MCP constrains
+`inputSchema` to an object. All three are caught at registration rather than
+surfacing later somewhere that misreports where the bug is — an unnameable tool
+would otherwise come back as "no such tool" at call time, in the client.
 
 - `add_tool` / `add_typed_tool` / `add_typed_tool_with_output_schema` **panic**
-  on a duplicate name or a non-object input schema. Registration is a
-  startup-time concern, so a collision fails immediately and names the offending
-  tool.
-- `try_add_tool` returns `Err(JsonError)` with code `duplicate_tool_name` or
-  `invalid_input_schema` and leaves the router unchanged. Use it when the tool
-  set is assembled dynamically from config, a plugin set, or user input.
+  on an empty or whitespace-only name, a duplicate name, or a non-object input
+  schema. Registration is a startup-time concern, so it fails immediately and
+  names the offending tool.
+- `try_add_tool` returns `Err(JsonError)` with code `invalid_tool_name`,
+  `duplicate_tool_name`, or `invalid_input_schema` and leaves the router
+  unchanged. Use it when the tool set is assembled dynamically from config, a
+  plugin set, or user input.
+
+Charset and length are deliberately **not** enforced: they are a downstream
+host's constraint, not this crate's. As a portability note, some hosts feed tool
+names into function-calling APIs with stricter rules (a common one is
+`^[a-zA-Z0-9_-]{1,64}$`), so names that stay inside that set travel furthest. A
+consumer targeting such a host can layer its own check over `try_add_tool`.
 
 The schema check is conservative: only a root that declares a non-object `type`
 is rejected, so a nested struct using `$defs` / `$ref` registers normally.
