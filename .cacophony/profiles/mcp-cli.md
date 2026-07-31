@@ -181,6 +181,38 @@ worker. Additive; extend over time rather than pruning.
   landing before closing the bead. This knowingly re-adds part of the local
   preflight the hosted-CI lane asks us to skip; that is the correct trade while
   the gate is absent, and it stops the moment the gate exists.
+- **When the CI verdict is UNREADABLE, the sanctioned state is "hold open", not
+  "close on local evidence".** `gh` returns HTTP 403 rate-limit against a token
+  shared by the whole fleet, and it goes dark exactly when a worker most needs
+  it: change finished, landed, locally verified, bead you are forbidden to
+  close. The tempting resolution in that moment is to close anyway — which is
+  precisely the behaviour the close-precondition exists to prevent — so
+  exhaustion does not merely delay the discipline, it pressures workers off it.
+  Do this instead:
+  1. Keep the bead open and claimed. An open bead costs a wait; a wrongly closed
+     one silently deletes the work from the queue (see the BLOCKED != CLOSED
+     section above). The costs are not symmetric, so hold.
+  2. Record the landed sha in the bead plus the result of reproducing CI's exact
+     command set locally on THAT sha — `cargo fmt --all -- --check`,
+     `cargo clippy --workspace --all-targets --all-features -- -D warnings`,
+     `cargo test --workspace --all-features`. This is strong evidence but NOT
+     the verdict: the hosted runner can carry a newer stable toolchain than the
+     checkout, so a local pass does not license a close.
+  3. Re-check when the limit resets (`gh` reports the window; core reset is
+     typically under an hour) and close on the real verdict.
+  4. If the limit persists long enough to strand finished work, escalate with
+     the recorded evidence rather than choosing between closing blind and
+     holding indefinitely. Do not hand-roll a raw API call to dodge `gh`.
+  Also avoid stacking further lands behind an unreadable gate: each one adds
+  another bead you cannot close and spends more of the same budget.
+- **Verification spends the budget it depends on.** Every land costs a compare
+  call plus a run-list, and the (correct) guidance to verify on true GitHub
+  rather than the lagging `origin` mirror multiplies that across every worker
+  against one fixed fleet-wide ceiling, so the discipline scales its own cost
+  linearly. That makes it a daemon-side problem rather than a per-project one:
+  surfacing remaining budget in the reintegration receipt, and caching run
+  conclusions by sha so N workers verifying one landed sha cost one call, both
+  fix it at the right layer. Raised in the `cacophony` project by md4-0.
 - **`clippy::pedantic` is on, so `too_many_lines` (100) bites long match-based
   dispatch.** `handle_request` crossed it at 104 lines by gaining one small arm.
   Extract an arm into its own method rather than reaching for an `allow`.
