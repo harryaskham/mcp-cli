@@ -768,7 +768,18 @@ impl<Ctx> McpServer<Ctx> {
                     })
                 })
             }
-            "notifications/initialized" => None,
+            // A notification carries no id and gets no response. If a client
+            // does send an id, JSON-RPC 2.0 makes this a request that MUST be
+            // answered, so reply with an empty result exactly as `ping` does
+            // rather than leaving the peer waiting on a response that never
+            // comes. `-32601` would be wrong here: the method is supported.
+            "notifications/initialized" => request.id.map(|id| {
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {}
+                })
+            }),
             "ping" => request.id.map(|id| {
                 json!({
                     "jsonrpc": "2.0",
@@ -1637,6 +1648,47 @@ mod tests {
             output.is_empty(),
             "initialized notification must not produce a response"
         );
+    }
+
+    #[test]
+    fn stdio_server_answers_initialized_when_the_client_sends_it_with_an_id() {
+        // JSON-RPC 2.0: a request object carrying an id is not a notification
+        // and MUST be answered. A client that assigns an id to every outgoing
+        // message would otherwise wait forever on this one, stalling the
+        // session with no error surfaced.
+        let server = sample_server();
+
+        let mut input = frame_request(&json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "notifications/initialized"
+        }));
+        input.extend_from_slice(&frame_request(&json!({
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "ping"
+        })));
+
+        let mut output = Vec::new();
+        server
+            .serve_transport(&(), std::io::Cursor::new(input), &mut output)
+            .expect("stdio server should accept initialized sent as a request");
+
+        let responses = parse_framed_responses(&output);
+        assert_eq!(responses.len(), 2, "responses: {responses:?}");
+
+        assert_eq!(responses[0]["jsonrpc"], "2.0");
+        assert_eq!(responses[0]["id"], 4);
+        assert_eq!(responses[0]["result"], json!({}));
+        assert!(
+            responses[0].get("error").is_none(),
+            "a supported method must not answer with an error: {:?}",
+            responses[0]
+        );
+
+        // The session keeps serving afterwards.
+        assert_eq!(responses[1]["id"], 5);
+        assert_eq!(responses[1]["result"], json!({}));
     }
 
     #[test]

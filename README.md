@@ -91,7 +91,9 @@ newline-delimited JSON (NDJSON): one JSON-RPC message per line terminated by
   `protocolVersion` is echoed when supported, otherwise the server advertises its
   latest supported version. The supported set is the `SUPPORTED_PROTOCOL_VERSIONS`
   constant.
-- `notifications/initialized` — accepted; produces no response.
+- `notifications/initialized` — accepted; produces no response. If a client
+  sends it with an `id` it is a request under JSON-RPC 2.0, so it is answered
+  with an empty result rather than leaving the client waiting.
 - `ping` — replies with an empty result.
 - `tools/list` — returns the router's tool metadata (name, description, input
   schema, and an optional `outputSchema` for tools registered with
