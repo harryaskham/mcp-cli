@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>mcp-cli · Rust crates for CLIs that are also MCP servers</title>
+<meta name="description" content="mcp-cli-core runs one typed Rust command as a CLI with JSON output or as a tool on an MCP stdio server. Four companion crates add configuration, self-update, feedback reporting and a cache-and-daemon transport. How they work, a recorded MCP session, and their tests.">
+<meta name="theme-color" content="#f4f6f8">
+<meta name="color-scheme" content="light">
+<meta name="a.skh.am:group" content="libraries">
+<link rel="icon" href="assets/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="assets/fonts/fonts.css">
+<link rel="stylesheet" href="assets/base.css">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<div class="wrap">
+<nav class="topbar" aria-label="Site">
+  <a href="https://a.skh.am/all/">a.skh.am/all</a><span aria-hidden="true">/</span><span>mcp-cli</span>
+  <a class="src" href="https://github.com/harryaskham/mcp-cli">Source on GitHub</a>
+</nav>
+
+<main id="main">
+<header class="intro">
+  <h1>mcp-cli</h1>
+  <p class="lede">Rust crates for command-line tools that agents can also call. <code>mcp-cli-core</code> runs one typed command either as a CLI that prints a JSON envelope or as a tool on an MCP server over stdio. Four companion crates add the rest of what such a tool needs: <a href="#configurable">configuration</a>, <a href="#updatable">self-update</a>, <a href="#feedback">feedback reporting</a> and a <a href="#remote">daemon with a shared cache</a>.</p>
+  <p>Nine of the tools on <a href="https://a.skh.am/tools/">a.skh.am/tools</a> depend on at least one of them. Each crate is consumed as a Git dependency; the package is <code>mcp-cli-core</code> because <code>mcp-cli</code> on crates.io is an unrelated project, but the library keeps the name <code>mcp_cli</code>.</p>
+</header>
+
+<section class="part" aria-labelledby="h-two">
+  <p class="api">mcp-cli-core</p>
+  <h2 id="h-two">One command, two surfaces</h2>
+  <figure>
+    <div class="fig" tabindex="0">
+      <!-- fig:surfaces -->
+<svg class="dg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 300" width="920" height="300" role="img" aria-labelledby="surfaces-t surfaces-d">
+<title id="surfaces-t">One command, two surfaces</title>
+<desc id="surfaces-d">How one typed command reaches both a person and an agent. The host registers a handler that takes a typed input and returns a typed output or a structured error. On the command line, write_json_result prints the result as a JSON envelope. Through the ToolRouter, the same handler becomes an MCP tool: McpServer answers tools/list with its name and a JSON Schema derived from the input type, and tools/call with the same envelope as structured content.</desc>
+<defs><marker id="surfaces-tip-b" class="k-b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path class="tip" d="M0 1L10 5L0 9z"/></marker><marker id="surfaces-tip-ink" class="k-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path class="tip" d="M0 1L10 5L0 9z"/></marker></defs>
+<g class="k-b"><path class="edge" d="M255.0 150.0 L295.0 150.0 Q305.0 150.0 305.0 140.0 L305.0 80.0 Q305.0 70.0 315.0 70.0 L355.0 70.0" stroke-width="1.5" marker-end="url(#surfaces-tip-b)"/></g>
+<g class="k-b"><path class="edge" d="M255.0 150.0 L295.0 150.0 Q305.0 150.0 305.0 160.0 L305.0 220.0 Q305.0 230.0 315.0 230.0 L355.0 230.0" stroke-width="1.5" marker-end="url(#surfaces-tip-b)"/></g>
+<g class="k-ink"><path class="edge" d="M525.0 70.0 L645.0 70.0" stroke-width="1.5" marker-end="url(#surfaces-tip-ink)"/></g>
+<g class="k-ink"><path class="edge" d="M525.0 230.0 L645.0 230.0" stroke-width="1.5" marker-end="url(#surfaces-tip-ink)"/></g>
+<g class="k-accent"><rect class="shadow" x="49.0" y="118.0" width="210.0" height="72.0"/><rect class="node" x="45.0" y="114.0" width="210.0" height="72.0" rx="1.5"/><text x="150.0" y="139.0" font-size="15" text-anchor="middle" class="lbl">your handler</text><text x="150.0" y="156.0" font-size="12.5" text-anchor="middle" class="sub">Input → Result&lt;Output, E&gt;</text><text x="150.0" y="172.0" font-size="12.5" text-anchor="middle" class="sub">E: StructuredError</text></g>
+<g class="k-b"><rect class="shadow" x="359.0" y="46.0" width="170.0" height="56.0"/><rect class="node" x="355.0" y="42.0" width="170.0" height="56.0" rx="1.5"/><text x="440.0" y="67.0" font-size="15" text-anchor="middle" class="lbl">CLI</text><text x="440.0" y="84.0" font-size="12.5" text-anchor="middle" class="sub">write_json_result</text></g>
+<g class="k-b"><rect class="shadow" x="359.0" y="206.0" width="170.0" height="56.0"/><rect class="node" x="355.0" y="202.0" width="170.0" height="56.0" rx="1.5"/><text x="440.0" y="227.0" font-size="15" text-anchor="middle" class="lbl">ToolRouter</text><text x="440.0" y="244.0" font-size="12.5" text-anchor="middle" class="sub">schema from Input</text></g>
+<g class="k-ink"><rect class="shadow" x="649.0" y="46.0" width="230.0" height="56.0"/><rect class="node" x="645.0" y="42.0" width="230.0" height="56.0" rx="1.5"/><text x="760.0" y="67.0" font-size="15" text-anchor="middle" class="lbl">JsonEnvelope on stdout</text><text x="760.0" y="84.0" font-size="12.5" text-anchor="middle" class="sub">status · meta · data | error</text></g>
+<g class="k-ink"><rect class="shadow" x="649.0" y="198.0" width="230.0" height="72.0"/><rect class="node" x="645.0" y="194.0" width="230.0" height="72.0" rx="1.5"/><text x="760.0" y="219.0" font-size="15" text-anchor="middle" class="lbl">McpServer (stdio)</text><text x="760.0" y="236.0" font-size="12.5" text-anchor="middle" class="sub">tools/list · tools/call</text><text x="760.0" y="252.0" font-size="12.5" text-anchor="middle" class="sub">structuredContent = envelope</text></g>
+<g class="k-b"><rect class="lab-bg" x="274.1" y="78.4" width="61.8" height="20.0"/><text x="305.0" y="92.4" font-size="12" text-anchor="middle" class="elabel">a person</text></g>
+<g class="k-b"><rect class="lab-bg" x="274.1" y="201.6" width="61.8" height="20.0"/><text x="305.0" y="215.6" font-size="12" text-anchor="middle" class="elabel">an agent</text></g>
+</svg>
+<!-- /fig -->
+    </div>
+    <figcaption><b>The handler is written once.</b> The input type's JSON Schema becomes the tool's <code>inputSchema</code>; the result becomes the same envelope on both surfaces.</figcaption>
+  </figure>
+  <p>The output below comes from a small host in this repository (<code>scripts/site/demo</code>): three tools, <code>math_add</code>, <code>math_divide</code>, which refuses to divide by zero, and <code>crash</code>, which panics.</p>
+  <!-- gen:demo-source -->
+<pre tabindex="0"><code>fn router() -&gt; ToolRouter&lt;()&gt; {
+    let mut r = ToolRouter::new();
+    r.add_typed_tool(&quot;math_add&quot;, &quot;Add two integers.&quot;, |(), p: Pair| add(p));
+    r.add_typed_tool(&quot;math_divide&quot;, &quot;Divide one integer by another.&quot;, |(), p: Pair| divide(p));
+    r.add_typed_tool(&quot;crash&quot;, &quot;Panic, to show how a failing tool is reported.&quot;, |(), _: Pair| -&gt; Result&lt;Answer, MathError&gt; {
+        panic!(&quot;this tool always panics&quot;)
+    });
+    r
+}
+
+fn main() {
+    let args: Vec&lt;String&gt; = std::env::args().skip(1).collect();
+    let pair = |a: &amp;[String]| Pair { lhs: a[0].parse().unwrap(), rhs: a[1].parse().unwrap() };
+    match args.first().map(String::as_str) {
+        Some(&quot;add&quot;) =&gt; write_json_result(std::io::stdout(), add(pair(&amp;args[1..]))).unwrap(),
+        Some(&quot;divide&quot;) =&gt; write_json_result(std::io::stdout(), divide(pair(&amp;args[1..]))).unwrap(),
+        Some(&quot;mcp&quot;) =&gt; {
+            let config = StdioServerConfig { server_name: &quot;demo&quot;.to_owned(), server_version: &quot;0.1.0&quot;.to_owned() };
+            McpServer::new(config, router()).serve_stdio(&amp;()).unwrap();
+        }
+        _ =&gt; eprintln!(&quot;usage: demo add A B | demo divide A B | demo mcp&quot;),
+    }
+}</code></pre>
+<!-- /gen -->
+  <div class="cols">
+    <div>
+      <h3>As a CLI</h3>
+      <!-- gen:cli -->
+<pre tabindex="0"><code><span class="p">demo add 2 3</span>
+<span class="o">{&quot;status&quot;:&quot;success&quot;,&quot;meta&quot;:{&quot;schema_version&quot;:1},&quot;data&quot;:{&quot;value&quot;:5}}</span>
+<span class="p">demo divide 1 0</span>
+<span class="o">{&quot;status&quot;:&quot;error&quot;,&quot;meta&quot;:{&quot;schema_version&quot;:1},&quot;error&quot;:{&quot;category&quot;:&quot;validation&quot;,&quot;code&quot;:&quot;division_by_zero&quot;,&quot;message&quot;:&quot;cannot divide by zero&quot;}}</span>
+<span class="c"># exit status 0: the host decides what an error envelope exits with</span></code></pre>
+<!-- /gen -->
+      <h3>Errors are data</h3>
+      <p>A handler's error implements <code>StructuredError</code>: a category, a stable code and a message. Categories are fixed: <code>validation</code>, <code>unsupported_capability</code>, <code>missing_permission</code>, <code>target_not_found</code>, <code>platform_adapter_failure</code>, <code>execution_failure</code>, <code>config_error</code>, <code>serialization_error</code> and <code>timeout</code>, so a client can act on the category without parsing messages.</p>
+    </div>
+  </div>
+  <h3>As an MCP server</h3>
+  <p>One session with the same binary, <code>demo mcp</code>, recorded frame by frame: each line sent (→) and the reply (←). The <code>tools/list</code> reply is shortened to tool names, and each <code>tools/call</code> reply's text block, which repeats the envelope, is elided.</p>
+  <!-- gen:session -->
+<pre class="session" tabindex="0" aria-label="MCP session"><code><span class="req">→ {&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;id&quot;:1,&quot;method&quot;:&quot;initialize&quot;,&quot;params&quot;:{&quot;protocolVersion&quot;:&quot;2025-06-18&quot;,&quot;capabilities&quot;:{},&quot;clientInfo&quot;:{&quot;name&quot;:&quot;site&quot;,&quot;version&quot;:&quot;1&quot;}}}</span>
+<span class="rep">← {&quot;id&quot;:1,&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;result&quot;:{&quot;capabilities&quot;:{&quot;tools&quot;:{&quot;listChanged&quot;:false}},&quot;protocolVersion&quot;:&quot;2025-06-18&quot;,&quot;serverInfo&quot;:{&quot;name&quot;:&quot;demo&quot;,&quot;version&quot;:&quot;0.1.0&quot;}}}</span>
+<span class="req">→ {&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;method&quot;:&quot;notifications/initialized&quot;}</span>
+<span class="rep">← (a notification: no reply)</span>
+<span class="req">→ {&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;id&quot;:2,&quot;method&quot;:&quot;tools/list&quot;}</span>
+<span class="rep">← {&quot;id&quot;:2,&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;result&quot;:{&quot;tools&quot;:[&quot;math_add …&quot;,&quot;math_divide …&quot;,&quot;crash …&quot;]}}</span>
+<span class="req">→ {&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;id&quot;:3,&quot;method&quot;:&quot;tools/call&quot;,&quot;params&quot;:{&quot;name&quot;:&quot;math_add&quot;,&quot;arguments&quot;:{&quot;lhs&quot;:2,&quot;rhs&quot;:3}}}</span>
+<span class="rep">← {&quot;id&quot;:3,&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;result&quot;:{&quot;content&quot;:[&quot;… the same envelope as text …&quot;],&quot;isError&quot;:false,&quot;structuredContent&quot;:{&quot;data&quot;:{&quot;value&quot;:5},&quot;meta&quot;:{&quot;command&quot;:&quot;math_add&quot;,&quot;schema_version&quot;:1},&quot;status&quot;:&quot;success&quot;}}}</span>
+<span class="req">→ {&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;id&quot;:4,&quot;method&quot;:&quot;tools/call&quot;,&quot;params&quot;:{&quot;name&quot;:&quot;math_divide&quot;,&quot;arguments&quot;:{&quot;lhs&quot;:1,&quot;rhs&quot;:0}}}</span>
+<span class="rep">← {&quot;id&quot;:4,&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;result&quot;:{&quot;content&quot;:[&quot;… the same envelope as text …&quot;],&quot;isError&quot;:true,&quot;structuredContent&quot;:{&quot;error&quot;:{&quot;category&quot;:&quot;validation&quot;,&quot;code&quot;:&quot;division_by_zero&quot;,&quot;message&quot;:&quot;cannot divide by zero&quot;},&quot;meta&quot;:{&quot;command&quot;:&quot;math_divide&quot;,&quot;schema_version&quot;:1},&quot;status&quot;:&quot;error&quot;}}}</span>
+<span class="req">→ {not json</span>
+<span class="rep">← {&quot;error&quot;:{&quot;code&quot;:-32700,&quot;message&quot;:&quot;parse error: key must be a string at line 1 column 2&quot;},&quot;id&quot;:null,&quot;jsonrpc&quot;:&quot;2.0&quot;}</span>
+<span class="req">→ {&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;id&quot;:5,&quot;method&quot;:&quot;resources/list&quot;}</span>
+<span class="rep">← {&quot;error&quot;:{&quot;code&quot;:-32601,&quot;message&quot;:&quot;unsupported MCP method `resources/list`&quot;},&quot;id&quot;:5,&quot;jsonrpc&quot;:&quot;2.0&quot;}</span>
+<span class="req">→ {&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;id&quot;:6,&quot;method&quot;:&quot;tools/call&quot;,&quot;params&quot;:{&quot;name&quot;:&quot;math_add&quot;,&quot;arguments&quot;:{&quot;lhs&quot;:&quot;two&quot;}}}</span>
+<span class="rep">← {&quot;id&quot;:6,&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;result&quot;:{&quot;content&quot;:[&quot;… the same envelope as text …&quot;],&quot;isError&quot;:true,&quot;structuredContent&quot;:{&quot;error&quot;:{&quot;category&quot;:&quot;validation&quot;,&quot;code&quot;:&quot;invalid_tool_arguments&quot;,&quot;message&quot;:&quot;invalid tool arguments: invalid type: string \&quot;two\&quot;, expected i64&quot;},&quot;meta&quot;:{&quot;command&quot;:&quot;math_add&quot;,&quot;schema_version&quot;:1},&quot;status&quot;:&quot;error&quot;}}}</span>
+<span class="req">→ {&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;id&quot;:7,&quot;method&quot;:&quot;tools/call&quot;,&quot;params&quot;:{&quot;name&quot;:&quot;crash&quot;,&quot;arguments&quot;:{&quot;lhs&quot;:0,&quot;rhs&quot;:0}}}</span>
+<span class="rep">← {&quot;id&quot;:7,&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;result&quot;:{&quot;content&quot;:[&quot;… the same envelope as text …&quot;],&quot;isError&quot;:true,&quot;structuredContent&quot;:{&quot;error&quot;:{&quot;category&quot;:&quot;execution_failure&quot;,&quot;code&quot;:&quot;tool_panicked&quot;,&quot;message&quot;:&quot;tool `crash` panicked: this tool always panics&quot;},&quot;meta&quot;:{&quot;command&quot;:&quot;crash&quot;,&quot;schema_version&quot;:1},&quot;status&quot;:&quot;error&quot;}}}</span>
+<span class="req">→ {&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;id&quot;:8,&quot;method&quot;:&quot;ping&quot;}</span>
+<span class="rep">← {&quot;id&quot;:8,&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;result&quot;:{}}</span></code></pre>
+<!-- /gen -->
+</section>
+
+<section class="part" aria-labelledby="h-bad">
+  <h2 id="h-bad">Bad input keeps the session alive</h2>
+  <div class="cols">
+    <div class="table-wrap">
+      <table>
+        <caption>What the server does, as in the session above</caption>
+        <tbody>
+          <tr><th scope="row">a frame that is not JSON</th><td>JSON-RPC <code>-32700</code>, <code>id: null</code></td></tr>
+          <tr><th scope="row">an unknown method</th><td><code>-32601</code></td></tr>
+          <tr><th scope="row">params that don't deserialize</th><td><code>-32602</code></td></tr>
+          <tr><th scope="row">arguments of the wrong type</th><td>a tool error, <code>invalid_tool_arguments</code></td></tr>
+          <tr><th scope="row">a handler's own error</th><td><code>isError: true</code> with its code</td></tr>
+          <tr><th scope="row">a handler that panics</th><td><code>tool_panicked</code>; later requests still served</td></tr>
+          <tr><th scope="row">a frame over 16 MiB</th><td>discarded to the next newline, <code>-32700</code></td></tr>
+          <tr><th scope="row">a JSON array</th><td>a batch: one array of replies, notifications omitted</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div>
+      <p>Frames are newline-delimited JSON, and the server negotiates protocol versions 2024-11-05, 2025-03-26 and 2025-06-18. Tool registration panics at startup on an empty or duplicate name, or an input type whose schema is not an object, because those are programming errors better caught before any client connects; <code>try_add_tool</code> reports them as values for tool sets assembled at run time.</p>
+      <p class="warn"><b>stdout belongs to the protocol.</b> Anything else that reaches it, such as a <code>println!</code> in a handler, a logger on its default sink or a panic hook redirected to stdout, arrives at the client as a corrupt frame, and many clients drop the session. Send everything else to stderr; the crate cannot enforce it without <code>unsafe</code>, which it forbids.</p>
+    </div>
+  </div>
+</section>
+
+<section class="part" aria-labelledby="h-stack">
+  <h2 id="h-stack">The companion crates</h2>
+  <figure>
+    <div class="fig" tabindex="0">
+      <!-- fig:stack -->
+<svg class="dg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 330" width="920" height="330" role="img" aria-labelledby="stack-t stack-d">
+<title id="stack-t">The five crates</title>
+<desc id="stack-d">How the crates fit together. A host CLI depends on mcp-cli-core, which provides the JSON envelope, structured errors, the tool router and the MCP stdio server. configurable-cli, updatable-cli and feedback-cli build on it: each adds one concern and registers matching MCP tools on the host&#x27;s router (config_status and friends, self_update_status, check and run, feedback_status and feedback_report). remote-cli does not depend on mcp-cli-core; it is used alongside it, giving a host a daemon that owns a typed cache and serves it to the host&#x27;s CLI and MCP processes.</desc>
+<defs><marker id="stack-tip-ink" class="k-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path class="tip" d="M0 1L10 5L0 9z"/></marker><marker id="stack-tip-muted" class="k-muted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path class="tip" d="M0 1L10 5L0 9z"/></marker></defs>
+<g class="k-muted"><path class="edge" d="M460.0 68.0 L460.0 81.0 Q460.0 91.0 450.0 91.0 L130.0 91.0 Q120.0 91.0 120.0 101.0 L120.0 114.0" stroke-width="1.5" marker-end="url(#stack-tip-muted)"/></g>
+<g class="k-muted"><path class="edge" d="M460.0 68.0 L460.0 81.0 Q460.0 91.0 450.0 91.0 L360.0 91.0 Q350.0 91.0 350.0 101.0 L350.0 114.0" stroke-width="1.5" marker-end="url(#stack-tip-muted)"/></g>
+<g class="k-muted"><path class="edge" d="M460.0 68.0 L460.0 81.0 Q460.0 91.0 470.0 91.0 L570.0 91.0 Q580.0 91.0 580.0 101.0 L580.0 114.0" stroke-width="1.5" marker-end="url(#stack-tip-muted)"/></g>
+<g class="k-muted"><path class="edge" d="M460.0 68.0 L460.0 81.0 Q460.0 91.0 470.0 91.0 L800.0 91.0 Q810.0 91.0 810.0 101.0 L810.0 114.0" stroke-width="1.5" marker-end="url(#stack-tip-muted)"/></g>
+<g class="k-ink"><path class="edge" d="M120.0 186.0 L120.0 209.0 Q120.0 219.0 130.0 219.0 L260.0 219.0 Q270.0 219.0 270.0 229.0 L270.0 252.0" stroke-width="1.5" marker-end="url(#stack-tip-ink)"/></g>
+<g class="k-ink"><path class="edge" d="M350.0 186.0 L350.0 209.0 Q350.0 219.0 360.0 219.0 L370.0 219.0 Q380.0 219.0 380.0 229.0 L380.0 252.0" stroke-width="1.5" marker-end="url(#stack-tip-ink)"/></g>
+<g class="k-ink"><path class="edge" d="M580.0 186.0 L580.0 209.0 Q580.0 219.0 570.0 219.0 L500.0 219.0 Q490.0 219.0 490.0 229.0 L490.0 252.0" stroke-width="1.5" marker-end="url(#stack-tip-ink)"/></g>
+<g class="k-accent"><rect class="shadow" x="349.0" y="16.0" width="230.0" height="56.0"/><rect class="node" x="345.0" y="12.0" width="230.0" height="56.0" rx="1.5"/><text x="460.0" y="37.0" font-size="15" text-anchor="middle" class="lbl">your CLI</text><text x="460.0" y="54.0" font-size="12.5" text-anchor="middle" class="sub">one binary: CLI + MCP</text></g>
+<g class="k-b"><rect class="shadow" x="24.0" y="118.0" width="200.0" height="72.0"/><rect class="node" x="20.0" y="114.0" width="200.0" height="72.0" rx="1.5"/><text x="120.0" y="139.0" font-size="15" text-anchor="middle" class="lbl m">configurable-cli</text><text x="120.0" y="156.0" font-size="12.5" text-anchor="middle" class="sub">config show · init · import</text><text x="120.0" y="172.0" font-size="12.5" text-anchor="middle" class="sub">config_* tools</text></g>
+<g class="k-b"><rect class="shadow" x="254.0" y="118.0" width="200.0" height="72.0"/><rect class="node" x="250.0" y="114.0" width="200.0" height="72.0" rx="1.5"/><text x="350.0" y="139.0" font-size="15" text-anchor="middle" class="lbl m">updatable-cli</text><text x="350.0" y="156.0" font-size="12.5" text-anchor="middle" class="sub">update · status</text><text x="350.0" y="172.0" font-size="12.5" text-anchor="middle" class="sub">self_update_* tools</text></g>
+<g class="k-b"><rect class="shadow" x="484.0" y="118.0" width="200.0" height="72.0"/><rect class="node" x="480.0" y="114.0" width="200.0" height="72.0" rx="1.5"/><text x="580.0" y="139.0" font-size="15" text-anchor="middle" class="lbl m">feedback-cli</text><text x="580.0" y="156.0" font-size="12.5" text-anchor="middle" class="sub">errors and timings</text><text x="580.0" y="172.0" font-size="12.5" text-anchor="middle" class="sub">feedback_* tools</text></g>
+<g class="k-c"><rect class="shadow" x="714.0" y="118.0" width="200.0" height="72.0"/><rect class="node" x="710.0" y="114.0" width="200.0" height="72.0" rx="1.5"/><text x="810.0" y="139.0" font-size="15" text-anchor="middle" class="lbl m">remote-cli</text><text x="810.0" y="156.0" font-size="12.5" text-anchor="middle" class="sub">daemon · cache · SSE</text><text x="810.0" y="172.0" font-size="12.5" text-anchor="middle" class="sub">alongside the core</text></g>
+<g class="k-ink"><rect class="shadow" x="194.0" y="256.0" width="420.0" height="56.0"/><rect class="node" x="190.0" y="252.0" width="420.0" height="56.0" rx="1.5"/><text x="400.0" y="277.0" font-size="15" text-anchor="middle" class="lbl m">mcp-cli-core</text><text x="400.0" y="294.0" font-size="12.5" text-anchor="middle" class="sub">envelope · StructuredError · ToolRouter · McpServer</text></g>
+</svg>
+<!-- /fig -->
+    </div>
+    <figcaption><b>Same commands on both surfaces.</b> The three crates built on the core register MCP tools that mirror their CLI subcommands or API.</figcaption>
+  </figure>
+
+  <div class="crate" id="configurable">
+    <h3><code>configurable-cli</code>: one config file, done properly</h3>
+    <p>A host provides one serde and schemars type and a small <code>ConfigSpec</code>. The crate finds <code>~/.config/&lt;app&gt;/config.yaml</code> by a fixed precedence (an explicit path, <code>$APP_CONFIG</code>, <code>$XDG_CONFIG_HOME</code>, then <code>$HOME</code>), fills defaults for absent or partial files, validates, and writes owner-only (0600) files atomically, following relative or multi-hop symlinks to replace the real target. It supplies the <code>config show | path | status | init | validate | schema | export | import</code> subcommands and matching MCP tools; the ones that change files refuse unless called with <code>confirmed: true</code>.</p>
+  </div>
+
+  <div class="crate" id="updatable">
+    <h3><code>updatable-cli</code>: replacing a running binary</h3>
+    <p>For tools shipped as binaries through GitHub releases. <code>update</code> finds the newest release that actually has an asset for this platform, stages it as <code>&lt;tool&gt;_next</code> and checks its sha256; a hook early in <code>main</code> promotes it on the next start. Promotion is treated as a transaction, because replacing the executable destroys the only known-good copy on the machine:</p>
+    <figure>
+      <div class="fig" tabindex="0">
+        <!-- fig:promotion -->
+<svg class="dg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 270" width="920" height="270" role="img" aria-labelledby="promotion-t promotion-d">
+<title id="promotion-t">Replacing a running binary safely</title>
+<desc id="promotion-d">What updatable-cli&#x27;s startup hook does with a staged update. It launches the candidate once with a validation argument and a timeout, and refuses it if it cannot run. It copies the current executable to tool_prev and records its sha256; if that copy fails, it refuses the update. It then swaps the candidate into place and re-executes. If the new binary fails to start, tool_prev is restored and re-hashed to prove the original bytes are back. A failure to restore is reported separately from a failure to start, with the preserved path for manual recovery.</desc>
+<defs><marker id="promotion-tip-err" class="k-err" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path class="tip" d="M0 1L10 5L0 9z"/></marker><marker id="promotion-tip-ink" class="k-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path class="tip" d="M0 1L10 5L0 9z"/></marker><marker id="promotion-tip-ok" class="k-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path class="tip" d="M0 1L10 5L0 9z"/></marker><marker id="promotion-tip-warn" class="k-warn" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path class="tip" d="M0 1L10 5L0 9z"/></marker></defs>
+<g class="k-ink"><path class="edge" d="M155.0 70.0 L190.0 70.0" stroke-width="1.5" marker-end="url(#promotion-tip-ink)"/></g>
+<g class="k-ink"><path class="edge" d="M350.0 70.0 L380.0 70.0" stroke-width="1.5" marker-end="url(#promotion-tip-ink)"/></g>
+<g class="k-ink"><path class="edge" d="M540.0 70.0 L575.0 70.0" stroke-width="1.5" marker-end="url(#promotion-tip-ink)"/></g>
+<g class="k-ok"><path class="edge" d="M725.0 70.0 L775.0 70.0" stroke-width="1.5" marker-end="url(#promotion-tip-ok)"/></g>
+<g class="k-warn"><path class="edge" d="M270.0 98.0 L270.0 125.0 Q270.0 135.0 280.0 135.0 L315.0 135.0 Q325.0 135.0 325.0 145.0 L325.0 172.0" stroke-width="1.5" marker-end="url(#promotion-tip-warn)"/></g>
+<g class="k-warn"><path class="edge" d="M460.0 98.0 L460.0 125.0 Q460.0 135.0 450.0 135.0 L415.0 135.0 Q405.0 135.0 405.0 145.0 L405.0 172.0" stroke-width="1.5" marker-end="url(#promotion-tip-warn)"/></g>
+<g class="k-err"><path class="edge" d="M650.0 98.0 L650.0 125.0 Q650.0 135.0 660.0 135.0 L735.0 135.0 Q745.0 135.0 745.0 145.0 L745.0 172.0" stroke-width="1.5" marker-end="url(#promotion-tip-err)"/></g>
+<g class="k-file"><rect class="shadow" x="9.0" y="46.0" width="150.0" height="56.0"/><rect class="node" x="5.0" y="42.0" width="150.0" height="56.0" rx="1.5"/><text x="80.0" y="67.0" font-size="15" text-anchor="middle" class="lbl m">tool_next</text><text x="80.0" y="84.0" font-size="12.5" text-anchor="middle" class="sub">staged, sha256 ok</text></g>
+<g class="k-b"><rect class="shadow" x="194.0" y="46.0" width="160.0" height="56.0"/><rect class="node" x="190.0" y="42.0" width="160.0" height="56.0" rx="1.5"/><text x="270.0" y="67.0" font-size="15" text-anchor="middle" class="lbl">validate</text><text x="270.0" y="84.0" font-size="12.5" text-anchor="middle" class="sub">run once, timeout</text></g>
+<g class="k-b"><rect class="shadow" x="384.0" y="46.0" width="160.0" height="56.0"/><rect class="node" x="380.0" y="42.0" width="160.0" height="56.0" rx="1.5"/><text x="460.0" y="67.0" font-size="15" text-anchor="middle" class="lbl">preserve</text><text x="460.0" y="84.0" font-size="12.5" text-anchor="middle" class="sub">copy to tool_prev</text></g>
+<g class="k-accent"><rect class="shadow" x="579.0" y="46.0" width="150.0" height="56.0"/><rect class="node" x="575.0" y="42.0" width="150.0" height="56.0" rx="1.5"/><text x="650.0" y="67.0" font-size="15" text-anchor="middle" class="lbl">promote</text><text x="650.0" y="84.0" font-size="12.5" text-anchor="middle" class="sub">swap, re-exec</text></g>
+<g class="k-ok"><rect class="shadow" x="779.0" y="46.0" width="130.0" height="56.0"/><rect class="node" x="775.0" y="42.0" width="130.0" height="56.0" rx="1.5"/><text x="840.0" y="67.0" font-size="15" text-anchor="middle" class="lbl">running</text><text x="840.0" y="84.0" font-size="12.5" text-anchor="middle" class="sub">new version</text></g>
+<g class="k-warn"><rect class="shadow" x="269.0" y="176.0" width="200.0" height="56.0"/><rect class="node" x="265.0" y="172.0" width="200.0" height="56.0" rx="1.5"/><text x="365.0" y="197.0" font-size="15" text-anchor="middle" class="lbl">refused</text><text x="365.0" y="214.0" font-size="12.5" text-anchor="middle" class="sub">old binary untouched</text></g>
+<g class="k-err"><rect class="shadow" x="649.0" y="176.0" width="200.0" height="56.0"/><rect class="node" x="645.0" y="172.0" width="200.0" height="56.0" rx="1.5"/><text x="745.0" y="197.0" font-size="15" text-anchor="middle" class="lbl">restore tool_prev</text><text x="745.0" y="214.0" font-size="12.5" text-anchor="middle" class="sub">re-hash to prove it</text></g>
+<g class="k-warn"><rect class="lab-bg" x="256.4" y="125.0" width="69.4" height="20.0"/><text x="291.1" y="139.0" font-size="12" text-anchor="middle" class="elabel">won&#x27;t run</text></g>
+<g class="k-warn"><rect class="lab-bg" x="402.9" y="125.0" width="72.0" height="20.0"/><text x="438.9" y="139.0" font-size="12" text-anchor="middle" class="elabel">can&#x27;t copy</text></g>
+<g class="k-err"><rect class="lab-bg" x="642.8" y="125.0" width="92.4" height="20.0"/><text x="689.0" y="139.0" font-size="12" text-anchor="middle" class="elabel">fails to start</text></g>
+</svg>
+<!-- /fig -->
+      </div>
+      <figcaption><b>Never trade a working binary for one that cannot be undone.</b> On Windows, where the running executable is locked, the update stays staged and the hook prints what to do.</figcaption>
+    </figure>
+  </div>
+
+  <div class="crate" id="feedback">
+    <h3><code>feedback-cli</code>: errors and timings, back to the project</h3>
+    <p>A host builds the crate in and exposes a <code>FeedbackConfig</code> in its own configuration; the configured strategy decides where events go, so a project can switch backends without changing code: <code>webhook</code> (POST each event as JSON, optionally with a bearer token read from an environment variable, synchronously or in the background), <code>caco_cli</code> (the local Cacophony CLI), <code>file</code> (JSON lines), <code>stderr</code> (the default) or <code>disabled</code>. Any <code>StructuredError</code> can be reported in one call.</p>
+  </div>
+
+  <div class="crate" id="remote">
+    <h3><code>remote-cli</code>: one daemon owns the data</h3>
+    <p>For tools that read from a slow or rate-limited API from many processes. One daemon collects and publishes typed snapshots; every CLI or MCP process subscribes, so only one process talks to the upstream API.</p>
+    <figure>
+      <div class="fig" tabindex="0">
+        <!-- fig:remote -->
+<svg class="dg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 330" width="920" height="330" role="img" aria-labelledby="remote-t remote-d">
+<title id="remote-t">One owner of the data, many readers</title>
+<desc id="remote-d">remote-cli&#x27;s shape. In the daemon, the host&#x27;s collector fetches from the upstream API and commits each result to a shared snapshot with a monotonic revision, persisted by atomic, owner-only replacement of a cache file. The daemon serves the snapshot over HTTP or a Unix socket, always with a bearer token: GET /snapshot, a Server-Sent Events stream of new revisions, GET /health, POST /refresh and an optional POST /command for confirmed mutations. CLI and MCP processes subscribe as clients and write the received revisions through to their own cache. If the daemon is gone for longer than a timeout, one client takes a lease file and collects in its place until the daemon returns with a newer revision.</desc>
+<defs><marker id="remote-tip-c" class="k-c" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path class="tip" d="M0 1L10 5L0 9z"/></marker><marker id="remote-tip-ink" class="k-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path class="tip" d="M0 1L10 5L0 9z"/></marker><marker id="remote-tip-muted" class="k-muted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path class="tip" d="M0 1L10 5L0 9z"/></marker><marker id="remote-tip-warn-o" class="k-warn" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path class="tip open" d="M1.5 1.5L8.5 5L1.5 8.5"/></marker></defs>
+<g class="k-muted"><path class="edge" d="M165.0 70.0 L205.0 70.0" stroke-width="1.5" marker-end="url(#remote-tip-muted)"/></g>
+<g class="k-ink"><path class="edge" d="M355.0 70.0 L385.0 70.0" stroke-width="1.5" marker-end="url(#remote-tip-ink)"/></g>
+<g class="k-muted"><path class="edge" d="M470.0 98.0 L470.0 152.0" stroke-width="1.5" marker-end="url(#remote-tip-muted)"/></g>
+<g class="k-ink"><path class="edge" d="M555.0 70.0 L585.0 70.0" stroke-width="1.5" marker-end="url(#remote-tip-ink)"/></g>
+<g class="k-c"><path class="edge" d="M700.0 106.0 L700.0 226.0" stroke-width="1.5" marker-end="url(#remote-tip-c)"/></g>
+<g class="k-warn"><path class="edge dash" d="M585.0 262.0 L340.0 262.0" stroke-width="1.5" marker-end="url(#remote-tip-warn-o)"/></g>
+<g class="k-muted"><rect class="shadow" x="19.0" y="54.0" width="150.0" height="40.0"/><rect class="node" x="15.0" y="50.0" width="150.0" height="40.0" rx="1.5"/><text x="90.0" y="75.0" font-size="15" text-anchor="middle" class="lbl">upstream API</text></g>
+<g class="k-accent"><rect class="shadow" x="209.0" y="46.0" width="150.0" height="56.0"/><rect class="node" x="205.0" y="42.0" width="150.0" height="56.0" rx="1.5"/><text x="280.0" y="67.0" font-size="15" text-anchor="middle" class="lbl">collector</text><text x="280.0" y="84.0" font-size="12.5" text-anchor="middle" class="sub">host code</text></g>
+<g class="k-b"><rect class="shadow" x="389.0" y="46.0" width="170.0" height="56.0"/><rect class="node" x="385.0" y="42.0" width="170.0" height="56.0" rx="1.5"/><text x="470.0" y="67.0" font-size="15" text-anchor="middle" class="lbl m">SharedSnapshot</text><text x="470.0" y="84.0" font-size="12.5" text-anchor="middle" class="sub">revision n</text></g>
+<g class="k-file"><rect class="shadow" x="389.0" y="156.0" width="170.0" height="56.0"/><rect class="node" x="385.0" y="152.0" width="170.0" height="56.0" rx="1.5"/><text x="470.0" y="177.0" font-size="15" text-anchor="middle" class="lbl">cache file</text><text x="470.0" y="194.0" font-size="12.5" text-anchor="middle" class="sub">atomic, 0600</text></g>
+<g class="k-ink"><rect class="shadow" x="589.0" y="38.0" width="230.0" height="72.0"/><rect class="node" x="585.0" y="34.0" width="230.0" height="72.0" rx="1.5"/><text x="700.0" y="59.0" font-size="15" text-anchor="middle" class="lbl">server</text><text x="700.0" y="76.0" font-size="12.5" text-anchor="middle" class="sub">/snapshot · /events (SSE)</text><text x="700.0" y="92.0" font-size="12.5" text-anchor="middle" class="sub">/health · /refresh · /command</text></g>
+<g class="k-c"><rect class="shadow" x="589.0" y="230.0" width="230.0" height="72.0"/><rect class="node" x="585.0" y="226.0" width="230.0" height="72.0" rx="1.5"/><text x="700.0" y="251.0" font-size="15" text-anchor="middle" class="lbl">CLI and MCP clients</text><text x="700.0" y="268.0" font-size="12.5" text-anchor="middle" class="sub">subscribe, write through</text><text x="700.0" y="284.0" font-size="12.5" text-anchor="middle" class="sub">bearer token, any transport</text></g>
+<g class="k-warn"><rect class="shadow" x="164.0" y="238.0" width="180.0" height="56.0"/><rect class="node" x="160.0" y="234.0" width="180.0" height="56.0" rx="1.5"/><text x="250.0" y="259.0" font-size="15" text-anchor="middle" class="lbl">fallback lease</text><text x="250.0" y="276.0" font-size="12.5" text-anchor="middle" class="sub">one client collects</text></g>
+<g class="k-c"><rect class="lab-bg" x="653.6" y="156.0" width="92.8" height="20.0"/><text x="700.0" y="170.0" font-size="12" text-anchor="middle" class="elabel">SSE revisions</text></g>
+<g class="k-warn"><rect class="lab-bg" x="432.0" y="252.0" width="85.6" height="20.0"/><text x="474.8" y="266.0" font-size="12" text-anchor="middle" class="elabel">daemon gone</text></g>
+</svg>
+<!-- /fig -->
+      </div>
+      <figcaption><b>The same protocol over a socket or the network.</b> Bearer authentication applies on Unix sockets too, so moving from local to remote changes only an address.</figcaption>
+    </figure>
+    <p>Request headers and bodies have separate limits (16 KiB and 1 MiB by default): oversized headers get 431, an oversized declared body 413 before it is read, and authentication is checked before the rest of a body is accepted. A delayed writer can never overwrite a newer revision. The flake exports <code>lib.mkDaemonModules</code>, which generates matching NixOS, nix-darwin and Nix-on-Droid service modules for any host following the crate's command-line contract.</p>
+  </div>
+</section>
+
+<section class="part" aria-labelledby="h-tests">
+  <h2 id="h-tests">Tests and use</h2>
+  <div class="table-wrap narrow">
+    <!-- gen:tests -->
+<table class="tests"><caption>cargo test --all-features, run by scripts/site/capture.py</caption><thead><tr><th scope="col">Crate</th><th scope="col" class="num">Passed</th><th scope="col" class="num">Failed</th><th scope="col">Commit</th></tr></thead><tbody><tr><td><code>mcp-cli</code></td><td class="num">55</td><td class="num">0</td><td><code>81e5523</code></td></tr><tr><td><code>configurable-cli</code></td><td class="num">9</td><td class="num">0</td><td><code>7d2234a</code></td></tr><tr><td><code>updatable-cli</code></td><td class="num">64</td><td class="num">0</td><td><code>115eff1</code></td></tr><tr><td><code>feedback-cli</code></td><td class="num">25</td><td class="num">0</td><td><code>5cfeded</code></td></tr><tr><td><code>remote-cli</code></td><td class="num">26</td><td class="num">0</td><td><code>0d05051</code></td></tr></tbody></table>
+<!-- /gen -->
+  </div>
+  <p>Each crate's suite was run at the commit shown. Add the crates as Git dependencies:</p>
+<pre tabindex="0"><code>[dependencies]
+mcp-cli-core = { git = "https://github.com/harryaskham/mcp-cli" }
+configurable-cli = { git = "https://github.com/harryaskham/configurable-cli" }
+updatable-cli = { git = "https://github.com/harryaskham/updatable-cli" }
+feedback-cli = { git = "https://github.com/harryaskham/feedback-cli" }
+remote-cli = { git = "https://github.com/harryaskham/remote-cli" }</code></pre>
+</section>
+</main>
+
+<footer class="foot">
+  <span>mcp-cli</span>
+  <a href="https://github.com/harryaskham/mcp-cli">mcp-cli-core</a>
+  <a href="https://github.com/harryaskham/configurable-cli">configurable-cli</a>
+  <a href="https://github.com/harryaskham/updatable-cli">updatable-cli</a>
+  <a href="https://github.com/harryaskham/feedback-cli">feedback-cli</a>
+  <a href="https://github.com/harryaskham/remote-cli">remote-cli</a>
+  <a href="https://a.skh.am/all/">More at a.skh.am/all</a>
+</footer>
+</div>
+<script src="assets/site.js" defer></script>
+</body>
+</html>

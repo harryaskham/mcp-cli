@@ -1,0 +1,37 @@
+/* mcp-cli — an engineering spec sheet. Cool paper, navy ink, Rust orange for what you write and
+   teal for what the crates provide; Chakra Petch for headings, IBM Plex Sans for prose, JetBrains
+   Mono for frames and code. The MCP session is set like a wire log. */
+
+:root {
+  --page-bg: #f4f6f8; --page-text: #1d2633; --page-muted: #586374; --page-line: #d7dde5;
+  --page-accent: #b4521f; --strong: #0f1620; --surface: #ffffff; --raise: #e9edf2;
+  --code-bg: #e9edf2; --code-text: #1a2433;
+  --page-ui: "IBM Plex Sans", system-ui, sans-serif;
+  --display: "Chakra Petch", "IBM Plex Sans", sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, monospace;
+  --teal: #1f6f80;
+  --k-ink: #1d2633; --k-accent: #c25a24; --k-b: var(--teal); --k-c: #6a4fa0; --k-ok: #2b7a49; --k-warn: #a86b0a;
+  --k-err: #b4321f; --k-muted: #7d8794; --k-file: #6b7280;
+}
+
+header.intro h1 { font-size: clamp(46px, 7vw, 84px); font-weight: 600; letter-spacing: -0.01em; }
+header.intro h1::before { content: "$ "; color: var(--page-accent); }
+h2, h3 { font-family: var(--display); font-weight: 600; }
+h3 code { font-size: 0.95em; background: none; padding: 0; color: var(--teal); }
+.api { margin: 0 0 6px; font: 500 13px/1.4 var(--mono); color: var(--teal); }
+.fig { padding: 16px 12px; background: var(--surface); border: 1px solid var(--page-line); border-radius: 6px; }
+.dg .lab-bg { fill: var(--surface); }
+.dg .halo { stroke: var(--surface); }
+
+pre.session { background: #0f1620; color: #d9e2ec; font-size: 13px; line-height: 1.55; white-space: normal; }
+pre.session span { display: block; white-space: pre-wrap; word-break: break-all; padding-left: 1.6em; text-indent: -1.6em; }
+pre.session .rep { margin-bottom: 8px; }
+pre.wrap code, pre .o { white-space: pre-wrap; overflow-wrap: anywhere; }
+pre.session .req { color: #ffb37d; }
+pre.session .rep { color: #9fe0ec; }
+table th[scope="row"] { font-weight: 500; color: var(--page-muted); width: 46%; }
+table td.num, table th.num { text-align: right; font-family: var(--mono); padding-right: 18px; }
+.warn { padding: 12px 14px; background: #fff4e8; border-left: 3px solid var(--page-accent); border-radius: 0 6px 6px 0; }
+.crate { margin-top: 30px; }
+.crate h3 { margin-top: 0; font-size: 21px; }
+.table-wrap.narrow { max-width: 560px; }
