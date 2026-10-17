@@ -1,0 +1,32 @@
+{
+ "mcp-cli": {
+  "commit": "81e5523",
+  "passed": 55,
+  "failed": 0,
+  "ok": true
+ },
+ "configurable-cli": {
+  "commit": "7d2234a",
+  "passed": 9,
+  "failed": 0,
+  "ok": true
+ },
+ "updatable-cli": {
+  "commit": "115eff1",
+  "passed": 64,
+  "failed": 0,
+  "ok": true
+ },
+ "feedback-cli": {
+  "commit": "5cfeded",
+  "passed": 25,
+  "failed": 0,
+  "ok": true
+ },
+ "remote-cli": {
+  "commit": "0d05051",
+  "passed": 26,
+  "failed": 0,
+  "ok": true
+ }
+}

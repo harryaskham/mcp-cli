@@ -1,0 +1,271 @@
+{
+ "cli": {
+  "add": {
+   "args": [
+    "add",
+    "2",
+    "3"
+   ],
+   "stdout": "{\"status\":\"success\",\"meta\":{\"schema_version\":1},\"data\":{\"value\":5}}",
+   "exit": 0
+  },
+  "divide": {
+   "args": [
+    "divide",
+    "1",
+    "0"
+   ],
+   "stdout": "{\"status\":\"error\",\"meta\":{\"schema_version\":1},\"error\":{\"category\":\"validation\",\"code\":\"division_by_zero\",\"message\":\"cannot divide by zero\"}}",
+   "exit": 0
+  }
+ },
+ "session": [
+  {
+   "request": "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"site\",\"version\":\"1\"}}}",
+   "reply": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "result": {
+     "capabilities": {
+      "tools": {
+       "listChanged": false
+      }
+     },
+     "protocolVersion": "2025-06-18",
+     "serverInfo": {
+      "name": "demo",
+      "version": "0.1.0"
+     }
+    }
+   }
+  },
+  {
+   "request": "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}",
+   "reply": null
+  },
+  {
+   "request": "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}",
+   "reply": {
+    "id": 2,
+    "jsonrpc": "2.0",
+    "result": {
+     "tools": [
+      {
+       "description": "Add two integers.",
+       "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+         "lhs": {
+          "format": "int64",
+          "type": "integer"
+         },
+         "rhs": {
+          "format": "int64",
+          "type": "integer"
+         }
+        },
+        "required": [
+         "lhs",
+         "rhs"
+        ],
+        "title": "Pair",
+        "type": "object"
+       },
+       "name": "math_add"
+      },
+      {
+       "description": "Divide one integer by another.",
+       "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+         "lhs": {
+          "format": "int64",
+          "type": "integer"
+         },
+         "rhs": {
+          "format": "int64",
+          "type": "integer"
+         }
+        },
+        "required": [
+         "lhs",
+         "rhs"
+        ],
+        "title": "Pair",
+        "type": "object"
+       },
+       "name": "math_divide"
+      },
+      {
+       "description": "Panic, to show how a failing tool is reported.",
+       "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+         "lhs": {
+          "format": "int64",
+          "type": "integer"
+         },
+         "rhs": {
+          "format": "int64",
+          "type": "integer"
+         }
+        },
+        "required": [
+         "lhs",
+         "rhs"
+        ],
+        "title": "Pair",
+        "type": "object"
+       },
+       "name": "crash"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "request": "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"math_add\",\"arguments\":{\"lhs\":2,\"rhs\":3}}}",
+   "reply": {
+    "id": 3,
+    "jsonrpc": "2.0",
+    "result": {
+     "content": [
+      {
+       "text": "{\"status\":\"success\",\"meta\":{\"schema_version\":1,\"command\":\"math_add\"},\"data\":{\"value\":5}}",
+       "type": "text"
+      }
+     ],
+     "isError": false,
+     "structuredContent": {
+      "data": {
+       "value": 5
+      },
+      "meta": {
+       "command": "math_add",
+       "schema_version": 1
+      },
+      "status": "success"
+     }
+    }
+   }
+  },
+  {
+   "request": "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{\"name\":\"math_divide\",\"arguments\":{\"lhs\":1,\"rhs\":0}}}",
+   "reply": {
+    "id": 4,
+    "jsonrpc": "2.0",
+    "result": {
+     "content": [
+      {
+       "text": "{\"status\":\"error\",\"meta\":{\"schema_version\":1,\"command\":\"math_divide\"},\"error\":{\"category\":\"validation\",\"code\":\"division_by_zero\",\"message\":\"cannot divide by zero\"}}",
+       "type": "text"
+      }
+     ],
+     "isError": true,
+     "structuredContent": {
+      "error": {
+       "category": "validation",
+       "code": "division_by_zero",
+       "message": "cannot divide by zero"
+      },
+      "meta": {
+       "command": "math_divide",
+       "schema_version": 1
+      },
+      "status": "error"
+     }
+    }
+   }
+  },
+  {
+   "request": "{not json",
+   "reply": {
+    "error": {
+     "code": -32700,
+     "message": "parse error: key must be a string at line 1 column 2"
+    },
+    "id": null,
+    "jsonrpc": "2.0"
+   }
+  },
+  {
+   "request": "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"resources/list\"}",
+   "reply": {
+    "error": {
+     "code": -32601,
+     "message": "unsupported MCP method `resources/list`"
+    },
+    "id": 5,
+    "jsonrpc": "2.0"
+   }
+  },
+  {
+   "request": "{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"tools/call\",\"params\":{\"name\":\"math_add\",\"arguments\":{\"lhs\":\"two\"}}}",
+   "reply": {
+    "id": 6,
+    "jsonrpc": "2.0",
+    "result": {
+     "content": [
+      {
+       "text": "{\"status\":\"error\",\"meta\":{\"schema_version\":1,\"command\":\"math_add\"},\"error\":{\"category\":\"validation\",\"code\":\"invalid_tool_arguments\",\"message\":\"invalid tool arguments: invalid type: string \\\"two\\\", expected i64\"}}",
+       "type": "text"
+      }
+     ],
+     "isError": true,
+     "structuredContent": {
+      "error": {
+       "category": "validation",
+       "code": "invalid_tool_arguments",
+       "message": "invalid tool arguments: invalid type: string \"two\", expected i64"
+      },
+      "meta": {
+       "command": "math_add",
+       "schema_version": 1
+      },
+      "status": "error"
+     }
+    }
+   }
+  },
+  {
+   "request": "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\",\"params\":{\"name\":\"crash\",\"arguments\":{\"lhs\":0,\"rhs\":0}}}",
+   "reply": {
+    "id": 7,
+    "jsonrpc": "2.0",
+    "result": {
+     "content": [
+      {
+       "text": "{\"status\":\"error\",\"meta\":{\"schema_version\":1,\"command\":\"crash\"},\"error\":{\"category\":\"execution_failure\",\"code\":\"tool_panicked\",\"message\":\"tool `crash` panicked: this tool always panics\"}}",
+       "type": "text"
+      }
+     ],
+     "isError": true,
+     "structuredContent": {
+      "error": {
+       "category": "execution_failure",
+       "code": "tool_panicked",
+       "message": "tool `crash` panicked: this tool always panics"
+      },
+      "meta": {
+       "command": "crash",
+       "schema_version": 1
+      },
+      "status": "error"
+     }
+    }
+   }
+  },
+  {
+   "request": "{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"ping\"}",
+   "reply": {
+    "id": 8,
+    "jsonrpc": "2.0",
+    "result": {}
+   }
+  }
+ ],
+ "stderr": [
+  "thread 'main' (2186237) panicked at src/main.rs:48:9:",
+  "this tool always panics"
+ ]
+}
