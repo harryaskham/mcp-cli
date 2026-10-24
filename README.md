@@ -131,6 +131,37 @@ is rejected, so a nested struct using `$defs` / `$ref` registers normally.
   Tools are cloned out of the catalog before they run, so a handler may update the
   catalog (e.g. enable a plugin) without deadlocking.
 
+## Streamable HTTP (feature `http`)
+
+`mcp_cli::http::HttpServer` serves an `McpServer` over MCP Streamable HTTP
+(2025-06-18) with the same router. Enable it with
+`features = ["http"]`; stdio users pull in nothing extra.
+
+```rust
+use mcp_cli::http::{HttpServer, HttpServerConfig, HttpToken};
+
+let config = HttpServerConfig {
+    tokens: vec![HttpToken { principal: "alice".into(), token: read_token_file()? }],
+    ..HttpServerConfig::default() // 127.0.0.1:0, path /mcp
+};
+let server = HttpServer::start(Arc::new(mcp), config, |principal| Ok(MyCtx::for_principal(principal)))?;
+println!("listening on {}", server.local_addr());
+// … later: server.shutdown();
+```
+
+| | |
+| --- | --- |
+| Sessions | `initialize` creates one (`Mcp-Session-Id`) with its own context from the authenticated principal. Later requests must send the id (missing: 400; unknown, ended or another principal's: 404). `DELETE` ends a session and drops its context. Idle sessions expire. |
+| Headers | `MCP-Protocol-Version`, when sent, must be a supported version (400). Requests need `Content-Type: application/json` (415); `Accept` must allow JSON (406). |
+| Security | Bearer tokens map to principals (401). `Origin` must be allowlisted when present, and `Host` must name the bound address (403), against DNS rebinding. Loopback only, unless `tls_terminated_upstream` says a TLS proxy is in front. Unauthenticated use is opt-in and loopback-only. |
+| Limits | Body size (413), sessions and in-flight requests (503 with `Retry-After`). |
+| Responses | JSON for requests; `202` for a POST of only notifications. No server-to-client `GET` stream (405). |
+| Independence | Each `HttpServer` owns its listener, workers and sessions. Stopping one never affects another. |
+
+Handlers stay synchronous: `notifications/cancelled` is accepted but cannot
+interrupt a running call, so keep calls bounded. `tests/http.rs` covers all of
+the above, including two simultaneous servers.
+
 ## MCP protocol support
 
 > **stdout is the protocol channel.** `serve_stdio` frames everything this

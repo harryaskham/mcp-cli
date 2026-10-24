@@ -26,6 +26,12 @@ schemars = { version = "1.0.4", features = ["derive"] }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
 thiserror = "2.0.12"
+tiny_http = { version = "0.12", optional = true }
+getrandom = { version = "0.3", optional = true }
+
+[features]
+# Streamable HTTP transport (src/http.rs). Off by default: stdio users pull nothing extra.
+http = ["dep:tiny_http", "dep:getrandom"]
 
 [dev-dependencies]
 clap = { version = "4.5.37", features = ["derive"] }
@@ -40,3 +46,7 @@ module_name_repetitions = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 similar_names = "allow"
+
+[[test]]
+name = "http"
+required-features = ["http"]
