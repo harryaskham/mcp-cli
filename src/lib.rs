@@ -65,6 +65,8 @@ use serde_json::{Value, json};
 use thiserror::Error;
 
 mod content;
+#[cfg(feature = "http")]
+pub mod http;
 pub use content::{ContentBlock, EmbeddedResource, ToolAnnotations, ToolOutput, base64_encode};
 
 /// Stable schema version for JSON envelopes shared by CLI and MCP surfaces.
