@@ -297,7 +297,7 @@ fn session_headers_are_required_and_enforced() {
         note,
     );
     assert_eq!(accepted.status, 202);
-    assert!(accepted.body.is_empty());
+    assert_eq!(accepted.body, "");
     let cancel = r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":2}}"#;
     assert_eq!(
         send(
