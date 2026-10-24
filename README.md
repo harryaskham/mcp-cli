@@ -106,6 +106,31 @@ consumer targeting such a host can layer its own check over `try_add_tool`.
 The schema check is conservative: only a root that declares a non-object `type`
 is rejected, so a nested struct using `$defs` / `$ref` registers normally.
 
+## Annotations, rich content and dynamic catalogs
+
+- **Titles and annotations.** `Tool::with_title` and `Tool::with_annotations`
+  advertise a display title and `ToolAnnotations` (`readOnlyHint`,
+  `destructiveHint`, `idempotentHint`, `openWorldHint`) in `tools/list`. They are
+  omitted unless set, and are hints only: never use them as authorisation.
+- **Rich results.** `Tool::new_rich` handlers return `ToolOutput<Output>`: the
+  envelope `data` plus `ContentBlock`s (`image`, `audio`, `resource_link`,
+  embedded `resource`). `tools/call` keeps the envelope as `structuredContent` and
+  the **first** `text` block, then appends the blocks. Their bytes never enter the
+  envelope, so clients or transcripts that keep only structured results do not
+  retain an image. Bound payload sizes yourself (`ContentBlock::payload_len`).
+- **Raw, schema-bound tools.** `Tool::new_raw(ToolMetadata::new(name,
+  description, schema), handler)` registers a tool from data (a catalog or plugin
+  manifest). The schema is advertised verbatim; arguments arrive as raw JSON and
+  the handler must validate them. Registration checks still apply.
+- **Changing catalogs.** `ToolRouter::remove_tool` and `ToolRouter::tool` manage a
+  router. `SharedToolRouter` wraps one for change at runtime (`update`), and
+  `McpServer::with_shared_router` advertises `tools.listChanged: true` and writes
+  `notifications/tools/list_changed` once after the first frame handled after a
+  change, provided the session is initialised. The stdio loop is synchronous, so a
+  notice follows the next request rather than arriving while the server waits.
+  Tools are cloned out of the catalog before they run, so a handler may update the
+  catalog (e.g. enable a plugin) without deadlocking.
+
 ## MCP protocol support
 
 > **stdout is the protocol channel.** `serve_stdio` frames everything this
@@ -158,8 +183,8 @@ newline-delimited JSON (NDJSON): one JSON-RPC message per line terminated by
   success and error variants and declares a root `"type": "object"`, which that
   revision requires of `outputSchema`.
 - `tools/call` — runs a typed tool and returns both `structuredContent` (the
-  stable `JsonEnvelope`) and a `text` content block, with `isError` reflecting
-  tool failures.
+  stable `JsonEnvelope`) and a `text` content block, followed by any rich content
+  blocks, with `isError` reflecting tool failures.
 
 Malformed input is answered with a JSON-RPC error while the session keeps
 serving, rather than tearing the connection down:

@@ -17,6 +17,26 @@ learn about them.
 
 ## Unreleased
 
+### Added
+
+- Tool titles and `ToolAnnotations` (`readOnlyHint`, `destructiveHint`,
+  `idempotentHint`, `openWorldHint`) via `Tool::with_title` /
+  `Tool::with_annotations`; omitted from `tools/list` unless set.
+- Rich results: `Tool::new_rich` handlers return `ToolOutput` with
+  `ContentBlock`s (image, audio, resource link, embedded resource) appended after
+  the envelope text block and never copied into `structuredContent`.
+  `Tool::call_rich`, `ToolRouter::call_tool_rich` and `ToolResult` expose them.
+- Raw schema-bound tools: `ToolMetadata::new` + `Tool::new_raw` for catalog- or
+  plugin-defined tools whose handlers receive raw arguments.
+- Dynamic catalogs: `ToolRouter::remove_tool` / `tool`, `SharedToolRouter`, and
+  `McpServer::with_shared_router`, which advertises `tools.listChanged` and sends
+  `notifications/tools/list_changed` after a change.
+
+Compatible: existing constructors, `Tool::call`, `ToolRouter::call_tool` and the
+`tools/call` text/structured shape are unchanged. `ToolMetadata` gains two
+optional fields; code that builds it with a struct literal must add
+`title: None, annotations: None` or use `ToolMetadata::new`.
+
 ### Changed
 
 - **BREAKING** — The package is renamed from `mcp-cli` to `mcp-cli-core`, because
