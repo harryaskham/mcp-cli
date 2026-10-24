@@ -106,6 +106,62 @@ consumer targeting such a host can layer its own check over `try_add_tool`.
 The schema check is conservative: only a root that declares a non-object `type`
 is rejected, so a nested struct using `$defs` / `$ref` registers normally.
 
+## Annotations, rich content and dynamic catalogs
+
+- **Titles and annotations.** `Tool::with_title` and `Tool::with_annotations`
+  advertise a display title and `ToolAnnotations` (`readOnlyHint`,
+  `destructiveHint`, `idempotentHint`, `openWorldHint`) in `tools/list`. They are
+  omitted unless set, and are hints only: never use them as authorisation.
+- **Rich results.** `Tool::new_rich` handlers return `ToolOutput<Output>`: the
+  envelope `data` plus `ContentBlock`s (`image`, `audio`, `resource_link`,
+  embedded `resource`). `tools/call` keeps the envelope as `structuredContent` and
+  the **first** `text` block, then appends the blocks. Their bytes never enter the
+  envelope, so clients or transcripts that keep only structured results do not
+  retain an image. Bound payload sizes yourself (`ContentBlock::payload_len`).
+- **Raw, schema-bound tools.** `Tool::new_raw(ToolMetadata::new(name,
+  description, schema), handler)` registers a tool from data (a catalog or plugin
+  manifest). The schema is advertised verbatim; arguments arrive as raw JSON and
+  the handler must validate them. Registration checks still apply.
+- **Changing catalogs.** `ToolRouter::remove_tool` and `ToolRouter::tool` manage a
+  router. `SharedToolRouter` wraps one for change at runtime (`update`), and
+  `McpServer::with_shared_router` advertises `tools.listChanged: true` and writes
+  `notifications/tools/list_changed` once after the first frame handled after a
+  change, provided the session is initialised. The stdio loop is synchronous, so a
+  notice follows the next request rather than arriving while the server waits.
+  Tools are cloned out of the catalog before they run, so a handler may update the
+  catalog (e.g. enable a plugin) without deadlocking.
+
+## Streamable HTTP (feature `http`)
+
+`mcp_cli::http::HttpServer` serves an `McpServer` over MCP Streamable HTTP
+(2025-06-18) with the same router. Enable it with
+`features = ["http"]`; stdio users pull in nothing extra.
+
+```rust
+use mcp_cli::http::{HttpServer, HttpServerConfig, HttpToken};
+
+let config = HttpServerConfig {
+    tokens: vec![HttpToken { principal: "alice".into(), token: read_token_file()? }],
+    ..HttpServerConfig::default() // 127.0.0.1:0, path /mcp
+};
+let server = HttpServer::start(Arc::new(mcp), config, |principal| Ok(MyCtx::for_principal(principal)))?;
+println!("listening on {}", server.local_addr());
+// … later: server.shutdown();
+```
+
+| | |
+| --- | --- |
+| Sessions | `initialize` creates one (`Mcp-Session-Id`) with its own context from the authenticated principal. Later requests must send the id (missing: 400; unknown, ended or another principal's: 404). `DELETE` ends a session and drops its context. Idle sessions expire. |
+| Headers | `MCP-Protocol-Version`, when sent, must be a supported version (400). Requests need `Content-Type: application/json` (415); `Accept` must allow JSON (406). |
+| Security | Bearer tokens map to principals (401). `Origin` must be allowlisted when present, and `Host` must name the bound address (403), against DNS rebinding. Loopback only, unless `tls_terminated_upstream` says a TLS proxy is in front. Unauthenticated use is opt-in and loopback-only. |
+| Limits | Body size (413), sessions and in-flight requests (503 with `Retry-After`). |
+| Responses | JSON for requests; `202` for a POST of only notifications. No server-to-client `GET` stream (405). |
+| Independence | Each `HttpServer` owns its listener, workers and sessions. Stopping one never affects another. |
+
+Handlers stay synchronous: `notifications/cancelled` is accepted but cannot
+interrupt a running call, so keep calls bounded. `tests/http.rs` covers all of
+the above, including two simultaneous servers.
+
 ## MCP protocol support
 
 > **stdout is the protocol channel.** `serve_stdio` frames everything this
@@ -158,8 +214,8 @@ newline-delimited JSON (NDJSON): one JSON-RPC message per line terminated by
   success and error variants and declares a root `"type": "object"`, which that
   revision requires of `outputSchema`.
 - `tools/call` — runs a typed tool and returns both `structuredContent` (the
-  stable `JsonEnvelope`) and a `text` content block, with `isError` reflecting
-  tool failures.
+  stable `JsonEnvelope`) and a `text` content block, followed by any rich content
+  blocks, with `isError` reflecting tool failures.
 
 Malformed input is answered with a JSON-RPC error while the session keeps
 serving, rather than tearing the connection down:

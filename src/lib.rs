@@ -55,13 +55,19 @@
 
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::panic::{self, AssertUnwindSafe};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, PoisonError, RwLock};
 
 use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
+
+mod content;
+#[cfg(feature = "http")]
+pub mod http;
+pub use content::{ContentBlock, EmbeddedResource, ToolAnnotations, ToolOutput, base64_encode};
 
 /// Stable schema version for JSON envelopes shared by CLI and MCP surfaces.
 pub const JSON_SCHEMA_VERSION: u32 = 1;
@@ -332,9 +338,55 @@ pub struct ToolMetadata {
     /// was registered without an output schema.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_schema: Option<Value>,
+    /// Display title (MCP 2025-06-18). Older clients ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Behaviour hints (MCP 2025-03-26). Hints, never authorisation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<ToolAnnotations>,
 }
 
-type ToolHandler<Ctx> = dyn Fn(&Ctx, Value) -> JsonEnvelope<Value> + Send + Sync;
+impl ToolMetadata {
+    /// Metadata for a tool whose input schema is supplied directly, e.g. from a
+    /// catalog or plugin manifest rather than a Rust type.
+    #[must_use]
+    pub fn new(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        input_schema: Value,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            description: description.into(),
+            input_schema,
+            output_schema: None,
+            title: None,
+            annotations: None,
+        }
+    }
+}
+
+/// A tool call's outcome: the JSON envelope plus any extra content blocks.
+///
+/// The envelope is the `structuredContent` and first `text` block; `content`
+/// follows it in the MCP result and is never copied into the envelope.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolResult {
+    pub envelope: JsonEnvelope<Value>,
+    pub content: Vec<ContentBlock>,
+}
+
+impl ToolResult {
+    #[must_use]
+    pub const fn envelope(envelope: JsonEnvelope<Value>) -> Self {
+        Self {
+            envelope,
+            content: Vec::new(),
+        }
+    }
+}
+
+type ToolHandler<Ctx> = dyn Fn(&Ctx, Value) -> ToolResult + Send + Sync;
 
 /// A typed tool binding that can be exposed over MCP.
 pub struct Tool<Ctx> {
@@ -355,47 +407,110 @@ impl<Ctx> Tool<Ctx> {
         Error: StructuredError + 'static,
         Handler: Fn(&Ctx, Input) -> Result<Output, Error> + Send + Sync + 'static,
     {
+        Self::new_rich::<Input, Output, Error, _>(name, description, move |ctx, input| {
+            handler(ctx, input).map(ToolOutput::new)
+        })
+    }
+
+    /// Like [`Tool::new_typed`], but the handler may return extra content
+    /// blocks (images, audio, resource links, embedded resources) alongside the
+    /// envelope data. Those blocks are appended after the envelope `text` block
+    /// and are never copied into `structuredContent`.
+    #[must_use]
+    pub fn new_rich<Input, Output, Error, Handler>(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        handler: Handler,
+    ) -> Self
+    where
+        Input: DeserializeOwned + JsonSchema + 'static,
+        Output: Serialize + 'static,
+        Error: StructuredError + 'static,
+        Handler: Fn(&Ctx, Input) -> Result<ToolOutput<Output>, Error> + Send + Sync + 'static,
+    {
         let tool_name = name.into();
-        let metadata = ToolMetadata {
-            name: tool_name.clone(),
-            description: description.into(),
-            input_schema: serde_json::to_value(schemars::schema_for!(Input))
+        let metadata = ToolMetadata::new(
+            tool_name.clone(),
+            description,
+            serde_json::to_value(schemars::schema_for!(Input))
                 .expect("tool schema should serialize"),
-            output_schema: None,
-        };
+        );
 
         let erased_handler =
             move |ctx: &Ctx, arguments: Value| match serde_json::from_value(arguments) {
                 Ok(input) => match handler(ctx, input) {
-                    Ok(output) => match serde_json::to_value(output) {
-                        Ok(data) => JsonEnvelope::success_for(tool_name.clone(), data),
-                        Err(error) => JsonEnvelope::error_for(
+                    Ok(output) => match serde_json::to_value(output.data) {
+                        Ok(data) => ToolResult {
+                            envelope: JsonEnvelope::success_for(tool_name.clone(), data),
+                            content: output.content,
+                        },
+                        Err(error) => ToolResult::envelope(JsonEnvelope::error_for(
                             tool_name.clone(),
                             JsonError::new(
                                 ErrorCategory::SerializationError,
                                 "serialization_error",
                                 format!("failed to serialize tool result: {error}"),
                             ),
-                        ),
+                        )),
                     },
-                    Err(error) => {
-                        JsonEnvelope::error_for(tool_name.clone(), JsonError::from_error(&error))
-                    }
+                    Err(error) => ToolResult::envelope(JsonEnvelope::error_for(
+                        tool_name.clone(),
+                        JsonError::from_error(&error),
+                    )),
                 },
-                Err(error) => JsonEnvelope::error_for(
+                Err(error) => ToolResult::envelope(JsonEnvelope::error_for(
                     tool_name.clone(),
                     JsonError::new(
                         ErrorCategory::Validation,
                         "invalid_tool_arguments",
                         format!("invalid tool arguments: {error}"),
                     ),
-                ),
+                )),
             };
 
         Self {
             metadata,
             handler: Arc::new(erased_handler),
         }
+    }
+
+    /// A schema-bound tool registered from data rather than a Rust type, for
+    /// catalog-driven or plugin-provided tools.
+    ///
+    /// `metadata.input_schema` is advertised verbatim and the handler receives
+    /// the raw `arguments` object. The library does not validate arguments
+    /// against the schema: the handler (or the service behind it) must.
+    #[must_use]
+    pub fn new_raw<Handler>(metadata: ToolMetadata, handler: Handler) -> Self
+    where
+        Handler: Fn(&Ctx, Value) -> Result<ToolOutput<Value>, JsonError> + Send + Sync + 'static,
+    {
+        let tool_name = metadata.name.clone();
+        let erased_handler = move |ctx: &Ctx, arguments: Value| match handler(ctx, arguments) {
+            Ok(output) => ToolResult {
+                envelope: JsonEnvelope::success_for(tool_name.clone(), output.data),
+                content: output.content,
+            },
+            Err(error) => ToolResult::envelope(JsonEnvelope::error_for(tool_name.clone(), error)),
+        };
+        Self {
+            metadata,
+            handler: Arc::new(erased_handler),
+        }
+    }
+
+    /// Set the display title advertised in `tools/list`.
+    #[must_use]
+    pub fn with_title(mut self, title: impl Into<String>) -> Self {
+        self.metadata.title = Some(title.into());
+        self
+    }
+
+    /// Set behaviour hints advertised in `tools/list`.
+    #[must_use]
+    pub fn with_annotations(mut self, annotations: ToolAnnotations) -> Self {
+        self.metadata.annotations = Some(annotations);
+        self
     }
 
     /// Like [`Tool::new_typed`], but also advertises an `outputSchema` in the
@@ -458,6 +573,13 @@ impl<Ctx> Tool<Ctx> {
     ///   reports a bug to FIX, not a condition to handle.
     #[must_use]
     pub fn call(&self, ctx: &Ctx, arguments: Value) -> JsonEnvelope<Value> {
+        self.call_rich(ctx, arguments).envelope
+    }
+
+    /// Invoke the tool, keeping any extra content blocks. Panics are caught as
+    /// in [`Tool::call`]; a caught panic returns no extra content.
+    #[must_use]
+    pub fn call_rich(&self, ctx: &Ctx, arguments: Value) -> ToolResult {
         // `AssertUnwindSafe` is forced here, not chosen for convenience. The
         // closure captures `&Ctx`, which is `UnwindSafe` only when
         // `Ctx: RefUnwindSafe`, and `&Tool<Ctx>`, which never is: the handler is
@@ -467,8 +589,8 @@ impl<Ctx> Tool<Ctx> {
         let outcome = panic::catch_unwind(AssertUnwindSafe(|| (self.handler)(ctx, arguments)));
 
         match outcome {
-            Ok(envelope) => envelope,
-            Err(payload) => JsonEnvelope::error_for(
+            Ok(result) => result,
+            Err(payload) => ToolResult::envelope(JsonEnvelope::error_for(
                 self.metadata.name.clone(),
                 JsonError::new(
                     ErrorCategory::ExecutionFailure,
@@ -479,7 +601,16 @@ impl<Ctx> Tool<Ctx> {
                         panic_message(&payload)
                     ),
                 ),
-            ),
+            )),
+        }
+    }
+}
+
+impl<Ctx> Clone for Tool<Ctx> {
+    fn clone(&self) -> Self {
+        Self {
+            metadata: self.metadata.clone(),
+            handler: Arc::clone(&self.handler),
         }
     }
 }
@@ -615,40 +746,180 @@ impl<Ctx> ToolRouter<Ctx> {
             .collect()
     }
 
+    /// Remove a tool by name, returning whether one was registered.
+    pub fn remove_tool(&mut self, name: &str) -> bool {
+        let before = self.tools.len();
+        self.tools.retain(|tool| tool.metadata().name != name);
+        self.tools.len() != before
+    }
+
+    /// The registered tool with this name.
+    #[must_use]
+    pub fn tool(&self, name: &str) -> Option<&Tool<Ctx>> {
+        self.tools.iter().find(|tool| tool.metadata().name == name)
+    }
+
     #[must_use]
     pub fn call_tool(&self, ctx: &Ctx, name: &str, arguments: Value) -> JsonEnvelope<Value> {
-        match self.tools.iter().find(|tool| tool.metadata().name == name) {
-            Some(tool) => tool.call(ctx, arguments),
-            None => JsonEnvelope::error_for(
-                name,
-                JsonError::new(
-                    // A missing tool name is a not-found condition, not malformed
-                    // input: classify it as TargetNotFound so consumers routing on
-                    // ErrorCategory can distinguish it from validation errors.
-                    ErrorCategory::TargetNotFound,
-                    "unknown_tool",
-                    format!("unknown tool `{name}`"),
-                ),
-            ),
+        self.call_tool_rich(ctx, name, arguments).envelope
+    }
+
+    /// Like [`ToolRouter::call_tool`], keeping extra content blocks.
+    #[must_use]
+    pub fn call_tool_rich(&self, ctx: &Ctx, name: &str, arguments: Value) -> ToolResult {
+        match self.tool(name) {
+            Some(tool) => tool.call_rich(ctx, arguments),
+            None => ToolResult::envelope(unknown_tool(name)),
         }
     }
+}
+
+fn unknown_tool(name: &str) -> JsonEnvelope<Value> {
+    JsonEnvelope::error_for(
+        name,
+        JsonError::new(
+            // A missing tool name is a not-found condition, not malformed
+            // input: classify it as TargetNotFound so consumers routing on
+            // ErrorCategory can distinguish it from validation errors.
+            ErrorCategory::TargetNotFound,
+            "unknown_tool",
+            format!("unknown tool `{name}`"),
+        ),
+    )
+}
+
+/// A tool catalog that may change while a server is running.
+///
+/// Clones share one catalog. Every change through [`SharedToolRouter::update`]
+/// bumps a generation; a server built with [`McpServer::with_shared_router`]
+/// advertises `tools.listChanged` and sends `notifications/tools/list_changed`
+/// after the next frame it handles once the catalog differs from what the client
+/// last listed. (The stdio loop is synchronous, so the notice follows the next
+/// request rather than arriving spontaneously while the server waits for input.)
+///
+/// Calls clone the tool out of the catalog before running it, so a handler may
+/// itself update the catalog (e.g. enabling a plugin) without deadlocking.
+pub struct SharedToolRouter<Ctx> {
+    inner: Arc<RwLock<ToolRouter<Ctx>>>,
+    generation: Arc<AtomicU64>,
+}
+
+impl<Ctx> Clone for SharedToolRouter<Ctx> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+            generation: Arc::clone(&self.generation),
+        }
+    }
+}
+
+impl<Ctx> SharedToolRouter<Ctx> {
+    #[must_use]
+    pub fn new(router: ToolRouter<Ctx>) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(router)),
+            generation: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// Apply a change; the generation advances even if the closure fails, so a
+    /// partial update is still announced.
+    pub fn update<R>(&self, change: impl FnOnce(&mut ToolRouter<Ctx>) -> R) -> R {
+        let mut router = self.inner.write().unwrap_or_else(PoisonError::into_inner);
+        let result = change(&mut router);
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        result
+    }
+
+    /// Monotonic catalog generation.
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
+    }
+
+    #[must_use]
+    pub fn tool_metadata(&self) -> Vec<ToolMetadata> {
+        self.inner
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .tool_metadata()
+    }
+
+    #[must_use]
+    pub fn call_tool_rich(&self, ctx: &Ctx, name: &str, arguments: Value) -> ToolResult {
+        let tool = self
+            .inner
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .tool(name)
+            .cloned();
+        match tool {
+            Some(tool) => tool.call_rich(ctx, arguments),
+            None => ToolResult::envelope(unknown_tool(name)),
+        }
+    }
+}
+
+enum Routes<Ctx> {
+    Owned(ToolRouter<Ctx>),
+    Shared(SharedToolRouter<Ctx>),
 }
 
 /// A minimal reusable MCP stdio server for exposing typed tools.
 pub struct McpServer<Ctx> {
     config: StdioServerConfig,
-    router: ToolRouter<Ctx>,
+    router: Routes<Ctx>,
     max_frame_bytes: usize,
+    /// Catalog generation the client last listed (shared routers only).
+    announced: AtomicU64,
+    initialized: AtomicBool,
 }
 
 impl<Ctx> McpServer<Ctx> {
     #[must_use]
     pub fn new(config: StdioServerConfig, router: ToolRouter<Ctx>) -> Self {
+        Self::with_routes(config, Routes::Owned(router))
+    }
+
+    /// A server over a catalog that may change while it runs; see
+    /// [`SharedToolRouter`] for notification semantics.
+    #[must_use]
+    pub fn with_shared_router(config: StdioServerConfig, router: SharedToolRouter<Ctx>) -> Self {
+        let generation = router.generation();
+        let server = Self::with_routes(config, Routes::Shared(router));
+        server.announced.store(generation, Ordering::SeqCst);
+        server
+    }
+
+    fn with_routes(config: StdioServerConfig, router: Routes<Ctx>) -> Self {
         Self {
             config,
             router,
             max_frame_bytes: DEFAULT_MAX_FRAME_BYTES,
+            announced: AtomicU64::new(0),
+            initialized: AtomicBool::new(false),
         }
+    }
+
+    fn call_tool_rich(&self, ctx: &Ctx, name: &str, arguments: Value) -> ToolResult {
+        match &self.router {
+            Routes::Owned(router) => router.call_tool_rich(ctx, name, arguments),
+            Routes::Shared(router) => router.call_tool_rich(ctx, name, arguments),
+        }
+    }
+
+    /// `notifications/tools/list_changed` when a shared catalog has changed
+    /// since the client last listed it and the session is initialised.
+    fn list_changed_notification(&self) -> Option<Value> {
+        let Routes::Shared(router) = &self.router else {
+            return None;
+        };
+        if !self.initialized.load(Ordering::SeqCst) {
+            return None;
+        }
+        let current = router.generation();
+        (self.announced.swap(current, Ordering::SeqCst) != current)
+            .then(|| json!({ "jsonrpc": "2.0", "method": "notifications/tools/list_changed" }))
     }
 
     /// Override the largest single stdio frame this server will buffer.
@@ -675,7 +946,10 @@ impl<Ctx> McpServer<Ctx> {
 
     #[must_use]
     pub fn tool_metadata(&self) -> Vec<ToolMetadata> {
-        self.router.tool_metadata()
+        match &self.router {
+            Routes::Owned(router) => router.tool_metadata(),
+            Routes::Shared(router) => router.tool_metadata(),
+        }
     }
 
     /// Handle one parsed JSON-RPC value: a single request object, or a batch
@@ -827,6 +1101,9 @@ impl<Ctx> McpServer<Ctx> {
                     }
                 }
             }
+            if let Some(notification) = self.list_changed_notification() {
+                write_protocol_message(&mut writer, &notification)?;
+            }
         }
 
         Ok(())
@@ -859,11 +1136,14 @@ impl<Ctx> McpServer<Ctx> {
                 })
             }),
             "tools/list" => request.id.map(|id| {
+                if let Routes::Shared(router) = &self.router {
+                    self.announced.store(router.generation(), Ordering::SeqCst);
+                }
                 json!({
                     "jsonrpc": "2.0",
                     "id": id,
                     "result": {
-                        "tools": self.router.tool_metadata()
+                        "tools": self.tool_metadata()
                     }
                 })
             }),
@@ -894,6 +1174,8 @@ impl<Ctx> McpServer<Ctx> {
                 .and_then(Value::as_str),
         );
 
+        self.initialized.store(true, Ordering::SeqCst);
+        let list_changed = matches!(self.router, Routes::Shared(_));
         id.map(|id| {
             json!({
                 "jsonrpc": "2.0",
@@ -902,7 +1184,7 @@ impl<Ctx> McpServer<Ctx> {
                     "protocolVersion": protocol_version,
                     "capabilities": {
                         "tools": {
-                            "listChanged": false
+                            "listChanged": list_changed
                         }
                     },
                     "serverInfo": {
@@ -943,27 +1225,28 @@ impl<Ctx> McpServer<Ctx> {
                 }
             };
 
-        let envelope = self.router.call_tool(
+        let result = self.call_tool_rich(
             ctx,
             &params.name,
             params.arguments.unwrap_or_else(|| json!({})),
         );
-        let structured_content = serde_json::to_value(&envelope)?;
-        let text_content = serde_json::to_string(&envelope)?;
+        let structured_content = serde_json::to_value(&result.envelope)?;
+        let text_content = serde_json::to_string(&result.envelope)?;
+        // The envelope text block stays first so existing clients that read
+        // `content[0]` are unaffected; rich blocks follow it.
+        let mut content = vec![json!({ "type": "text", "text": text_content })];
+        for block in &result.content {
+            content.push(serde_json::to_value(block)?);
+        }
 
         Ok(id.map(|id| {
             json!({
                 "jsonrpc": "2.0",
                 "id": id,
                 "result": {
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": text_content
-                        }
-                    ],
+                    "content": content,
                     "structuredContent": structured_content,
-                    "isError": envelope.is_error()
+                    "isError": result.envelope.is_error()
                 }
             })
         }))
