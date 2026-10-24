@@ -129,7 +129,7 @@ struct Shared<Ctx> {
 
 /// A running server. Dropping it shuts it down.
 pub struct HttpServer<Ctx: Send + Sync + 'static> {
-    listener: Arc<tiny_http::Server>,
+    listener: Option<Arc<tiny_http::Server>>,
     shared: Arc<Shared<Ctx>>,
     workers: Vec<JoinHandle<()>>,
     addr: SocketAddr,
@@ -192,7 +192,7 @@ impl<Ctx: Send + Sync + 'static> HttpServer<Ctx> {
             })
             .collect();
         Ok(Self {
-            listener,
+            listener: Some(listener),
             shared,
             workers,
             addr,
@@ -219,12 +219,16 @@ impl<Ctx: Send + Sync + 'static> HttpServer<Ctx> {
         if self.shared.stopping.swap(true, Ordering::SeqCst) {
             return;
         }
-        for _ in &self.workers {
-            self.listener.unblock();
+        if let Some(listener) = &self.listener {
+            for _ in &self.workers {
+                listener.unblock();
+            }
         }
         for worker in self.workers.drain(..) {
             let _ = worker.join();
         }
+        // The workers are gone, so this is the last reference: the socket closes here.
+        self.listener = None;
         if let Ok(mut sessions) = self.shared.sessions.lock() {
             sessions.clear();
         }
@@ -348,12 +352,11 @@ fn handle<Ctx: Send + Sync + 'static>(shared: &Shared<Ctx>, request: tiny_http::
                     .then(|| sessions.remove(&id))
                     .flatten()
             });
-            reply(
-                request,
-                if removed.is_some() { 204 } else { 404 },
-                None,
-                &[],
-            );
+            let found = removed.is_some();
+            // Drop the session (and its context) before answering, so a client
+            // that sees 204 knows the session is gone.
+            drop(removed);
+            reply(request, if found { 204 } else { 404 }, None, &[]);
         }
         _ => reply(request, 405, None, &[("Allow", "POST, DELETE".into())]),
     }
@@ -543,7 +546,11 @@ fn post<Ctx: Send + Sync + 'static>(
     if let Ok(mut last) = session.last_used.lock() {
         *last = Instant::now();
     }
-    match shared.server.handle_request_value(&session.ctx, message) {
+    let outcome = shared.server.handle_request_value(&session.ctx, message);
+    // Release this request's hold on the session before answering: once the
+    // client has a response, ending the session drops its context at once.
+    drop(session);
+    match outcome {
         Ok(Some(response)) => reply(request, 200, Some(&response), &[]),
         Ok(None) => reply(request, 202, None, &[]),
         Err(error) => reply(

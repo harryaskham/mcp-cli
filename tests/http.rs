@@ -83,6 +83,24 @@ impl Reply {
     }
 }
 
+/// Whether anything at `addr` still answers HTTP, without panicking.
+fn answers(addr: SocketAddr) -> bool {
+    let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(500)) else {
+        return false;
+    };
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let request = format!(
+        "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\nContent-Length: 2\r\n\r\n{{}}",
+        addr.port()
+    );
+    let mut raw = String::new();
+    stream.write_all(request.as_bytes()).is_ok()
+        && stream.read_to_string(&mut raw).is_ok()
+        && raw.starts_with("HTTP/")
+}
+
 fn send(addr: SocketAddr, method: &str, headers: &[(&str, &str)], body: &str) -> Reply {
     let mut stream = TcpStream::connect(addr).expect("connects");
     stream
@@ -407,11 +425,7 @@ fn two_servers_are_independent() {
         1,
         "shutdown drops the server's sessions"
     );
-    assert!(
-        TcpStream::connect_timeout(&a, Duration::from_millis(500)).is_err()
-            || send(a, "POST", &[JSON], "{}").status == 0,
-        "the stopped server no longer answers"
-    );
+    assert!(!answers(a), "the stopped server no longer answers");
     assert_eq!(
         call(b, "token-b", &session_b).json()["result"]["structuredContent"]["data"]["principal"],
         "bob",
