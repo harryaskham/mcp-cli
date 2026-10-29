@@ -7,7 +7,7 @@
     let
       systems = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ];
       forAllSystems = f:
-        nixpkgs.lib.genAttrs systems (system: f (import nixpkgs { inherit system; }));
+        nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
     in
     {
       # `nix develop` (default shell) provides the Rust toolchain so CI on the
